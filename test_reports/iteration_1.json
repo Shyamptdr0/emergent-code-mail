@@ -1,0 +1,44 @@
+{
+  "summary": "First iteration end-to-end testing of MailTrack (Gmail tracking dashboard + Chrome extension backend). Seeded MongoDB user, session, and a tracked_email. Created /app/backend/tests/test_mailtrack_api.py with 13 pytest tests covering auth, tracking pixel, emails, follow-ups, stats. 12/13 backend tests pass. Frontend landing/login/dashboard/settings/emails/follow-ups all verified loading correctly with auth cookie seeded; stats and ext_api_key display properly.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "POST /api/follow-ups", "issue": "Returns 500 Internal Server Error. Root cause: `await db.follow_ups.insert_one(doc)` mutates `doc` to add MongoDB `_id` (ObjectId), and the endpoint returns `{k: v for k, v in doc.items()}` which still contains _id, causing FastAPI JSON serialization to fail with `TypeError: 'ObjectId' object is not iterable`. Fix: pop `_id` before returning, or build response dict before insert_one. Same risk pattern would apply if /track/create or /auth/session were ever changed similarly (currently safe).", "priority": "CRITICAL"}
+    ],
+    "minor": [
+      {"endpoint": "/api/auth/session", "issue": "After insert_one, no _id strip needed because endpoint returns explicit dict — OK, but `doc` mutation pattern is fragile codebase-wide."},
+      {"endpoint": "/api/auth/session", "issue": "Stores expires_at as datetime object (not ISO string) while created_at is ISO string — inconsistent. get_current_user handles both, so works, but inconsistent with project rule 'datetime stored as ISO strings'."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {"flow": "Follow-up creation from UI", "issue": "Because POST /api/follow-ups returns 500, any UI 'Create follow-up' action will fail. UI was not exercised for create (no creation form exposed on follow-ups page in DOM scan), but if/when wired it will break.", "affected_selectors": ["follow-ups page create button"]}
+    ],
+    "design_issues": [
+      {"screen": "Landing page", "issues": ["Looks clean and on-brand. No issues."]},
+      {"screen": "Dashboard / Settings / Emails / Follow-ups", "issues": ["All render correctly with proper spacing, contrast, and sidebar nav highlighting."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_mailtrack_api.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "FIX CRITICAL: POST /api/follow-ups must strip MongoDB _id from response. Replace `return {k: v for k, v in doc.items()}` with explicit dict (excluding `_id`) or `doc.pop('_id', None)` before return.",
+    "Optional: standardize datetime persistence to ISO strings everywhere (expires_at in user_sessions is currently a datetime object).",
+    "Note: SSE /api/events/stream causes ERR_CONNECTION_CLOSED occasionally in browser console — non-blocking but worth checking timeout/keepalive."
+  ],
+  "critical_code_review_comments": [
+    "server.py line 326: `return {k: v for k, v in doc.items()}` returns a copy that still contains the post-insert `_id` key (ObjectId) — root cause of the 500.",
+    "server.py: insert_one mutating shared dict pattern is risky; prefer building response dict from a typed object first.",
+    "server.py is 431 lines, currently within size limits but growing — consider splitting into routers (auth/tracking/follow-ups) if it grows further.",
+    "All other endpoints correctly project `{'_id': 0}` on reads. Good.",
+    "ext_api_key uses secrets.token_urlsafe(24) — secure. Rotate endpoint works.",
+    "CORS allow_origins='*' combined with allow_credentials=True is technically invalid per CORS spec; Starlette permits it but browsers may block credentialed cross-origin. Set explicit origins."
+  ],
+  "updated_files": ["/app/backend/tests/test_mailtrack_api.py", "/app/memory/test_credentials.md"],
+  "success_rate": {"backend": "92% (12/13 endpoints passing)", "frontend": "100% (all 5 routes render correctly)"},
+  "test_credentials": "session_token=test_session_1777984514110, ext_api_key=test_ext_key_1777984514110, user_id=test-user-1777984514110, tracked_email_id=trk_1777984514142 (seeded in MongoDB test_database)",
+  "seed_data_creation": "Inserted test user, user_session (7-day expiry), and one tracked_email (sent 5 days ago) into MongoDB test_database. See /app/memory/test_credentials.md.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Seeded MongoDB credentials are persisted in /app/memory/test_credentials.md. Re-run pytest /app/backend/tests/test_mailtrack_api.py after main agent fixes the follow-ups _id leak. The fix is a 1-line change. Frontend works fully when session_token cookie is set on the preview domain.",
+  "rca of the issue": "POST /api/follow-ups 500: motor's insert_one mutates the input dict to add `_id: ObjectId(...)`. The endpoint returns a dict-comprehension copy of that mutated doc, so ObjectId leaks into the JSON response and pydantic/Starlette's jsonable_encoder raises TypeError. Reproduce: POST /api/follow-ups with valid Bearer + tracked_email_id → 500. Mitigation: `doc.pop('_id', None)` before returning, or construct the response from FollowUpCreate + computed fields directly."
+}

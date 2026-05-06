@@ -1,0 +1,101 @@
+* { box-sizing: border-box; }
+body {
+  width: 360px;
+  margin: 0;
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
+  background: #fff;
+  color: #0a0a0a;
+}
+header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 16px;
+  border-bottom: 1px solid #e5e7eb;
+}
+.logo {
+  width: 24px; height: 24px;
+  background: #0a0a0a;
+  display: flex; align-items: center; justify-content: center;
+}
+.brand { font-weight: 800; letter-spacing: -0.02em; }
+.status {
+  margin-left: auto;
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: #9ca3af;
+  font-weight: 700;
+}
+.status.ok { color: #10b981; }
+.status.bad { color: #ef4444; }
+section { padding: 16px; }
+label {
+  display: block;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-weight: 700;
+  color: #6b7280;
+  margin: 10px 0 6px;
+}
+input {
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid #d1d5db;
+  font-size: 13px;
+  font-family: inherit;
+  background: #fff;
+  border-radius: 0;
+}
+input:focus { outline: none; border-color: #0a0a0a; }
+button {
+  width: 100%;
+  margin-top: 14px;
+  padding: 10px;
+  background: #0a0a0a;
+  color: #fff;
+  border: none;
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+  border-radius: 0;
+}
+button.reset {
+  background: #fff;
+  color: #0a0a0a;
+  border: 1px solid #d1d5db;
+  margin-top: 10px;
+}
+.head {
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  font-weight: 700;
+  color: #6b7280;
+  margin-bottom: 10px;
+}
+#list { list-style: none; padding: 0; margin: 0; max-height: 320px; overflow-y: auto; }
+#list li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid #f3f4f6;
+}
+#list li:last-child { border-bottom: 0; }
+.tick { width: 14px; height: 14px; flex-shrink: 0; }
+.tick.opened { color: #10b981; }
+.tick.sent { color: #cbd5e1; }
+.meta { flex: 1; min-width: 0; }
+.subj { font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rcpt { font-size: 11px; color: #6b7280; font-family: "IBM Plex Mono", monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cnt { font-size: 11px; font-weight: 700; color: #10b981; }
+.save-msg {
+  margin-top: 10px;
+  font-size: 11px;
+  font-family: "IBM Plex Mono", monospace;
+  min-height: 14px;
+}
+.save-msg.ok { color: #10b981; }
+.save-msg.err { color: #ef4444; }

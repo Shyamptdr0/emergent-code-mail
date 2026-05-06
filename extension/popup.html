@@ -1,0 +1,29 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <link rel="stylesheet" href="popup.css" />
+  <title>MailTrack</title>
+</head>
+<body>
+  <header>
+    <div class="logo"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#10B981" stroke-width="2.5"><path d="M2 12l5 5L14 8"/><path d="M12 17l9-9"/></svg></div>
+    <span class="brand">MailTrack</span>
+    <span id="status" class="status">…</span>
+  </header>
+  <section id="config">
+    <label>Backend URL</label>
+    <input id="backend" type="url" placeholder="https://your-app.preview.emergentagent.com" />
+    <label>API key</label>
+    <input id="apikey" type="text" placeholder="paste your key from Settings" />
+    <button id="save">Save & connect</button>
+    <div id="save-msg" class="save-msg"></div>
+  </section>
+  <section id="recent" hidden>
+    <div class="head">Recent tracked</div>
+    <ul id="list"></ul>
+    <button id="reset" class="reset">Change config</button>
+  </section>
+  <script src="popup.js"></script>
+</body>
+</html>

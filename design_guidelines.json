@@ -1,0 +1,125 @@
+{
+  "project_name": "MailTrack Pro - Email Tracking Extension & Dashboard",
+  "theme_and_archetype": {
+    "theme": "LIGHT",
+    "archetype": "Archetype 4 (Swiss & High-Contrast)",
+    "description": "Authoritative, clear, and highly functional. Emphasizes productivity and precision with stark contrast and clean lines. Breaks the generic SaaS mold with strong typography and minimal visual noise."
+  },
+  "typography": {
+    "fonts": {
+      "headings": "Cabinet Grotesk",
+      "body": "IBM Plex Sans",
+      "mono": "IBM Plex Mono",
+      "install_command": "Use Google Fonts or Fontsource for IBM Plex Sans. Include Cabinet Grotesk via CDN or local assets."
+    },
+    "scales": {
+      "h1": "text-5xl sm:text-6xl tracking-tighter font-black leading-none",
+      "h2": "text-3xl sm:text-4xl tracking-tight font-bold leading-tight",
+      "h3": "text-xl sm:text-2xl tracking-tight font-semibold",
+      "h4": "text-lg sm:text-xl font-medium",
+      "body": "text-base leading-relaxed",
+      "body_sm": "text-sm leading-relaxed",
+      "overline": "text-xs tracking-[0.2em] uppercase font-bold text-slate-500"
+    }
+  },
+  "colors": {
+    "backgrounds": {
+      "app_bg": "#F8F9FA",
+      "surface": "#FFFFFF",
+      "surface_hover": "#F3F4F6",
+      "extension_popup": "#FFFFFF"
+    },
+    "text": {
+      "primary": "#0A0A0A",
+      "secondary": "#4B5563",
+      "tertiary": "#9CA3AF"
+    },
+    "brand_and_accents": {
+      "primary": "#0A0A0A",
+      "primary_foreground": "#FFFFFF",
+      "success_tick": "#10B981",
+      "success_bg": "#D1FAE5",
+      "warning": "#F59E0B",
+      "border": "#E5E7EB",
+      "border_focus": "#0A0A0A"
+    },
+    "rules": {
+      "no_gradients": "Do not use full-screen gradients or purple-blue combinations. Stick to solid, high-contrast flat colors.",
+      "hover_states": "Interactive elements must clearly shift in contrast. Buttons invert or shift background brightness."
+    }
+  },
+  "layout_and_spacing": {
+    "strategy": "Generous Spacing Philosophy for Web, Space Efficiency for Extension",
+    "web_dashboard": {
+      "container": "max-w-7xl mx-auto px-4 sm:px-6 lg:px-8",
+      "grid": "grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6",
+      "card_padding": "p-6 sm:p-8"
+    },
+    "extension_popup": {
+      "dimensions": "w-[360px] max-h-[500px] overflow-y-auto",
+      "padding": "p-4",
+      "spacing": "gap-3",
+      "rule": "Avoid automatic popups. Ensure high contrast and hide extra options behind expandable UI."
+    },
+    "surfaces": {
+      "cards": "bg-white border border-slate-200 rounded-lg shadow-sm hover:shadow-md transition-all duration-200",
+      "glass": "bg-white/80 backdrop-blur-xl border-b border-slate-200/50"
+    }
+  },
+  "components": {
+    "buttons": {
+      "primary": "bg-[#0A0A0A] text-white hover:bg-slate-800 rounded-sm font-medium px-6 py-2.5 transition-colors",
+      "secondary": "bg-white text-[#0A0A0A] border border-slate-300 hover:bg-slate-50 rounded-sm font-medium px-6 py-2.5 transition-colors"
+    },
+    "inputs": {
+      "style": "bg-white border border-slate-300 rounded-sm px-4 py-2 focus:ring-1 focus:ring-black focus:border-black transition-all",
+      "labels": "text-sm font-medium text-slate-700 mb-1 block"
+    },
+    "email_ticks": {
+      "unopened": "text-slate-400 (Single or double grey tick)",
+      "opened": "text-[#10B981] (Double green tick)"
+    },
+    "tables": {
+      "style": "w-full text-left border-collapse",
+      "headers": "border-b border-slate-200 pb-3 text-sm font-medium text-slate-500",
+      "cells": "py-4 border-b border-slate-100 text-sm align-middle"
+    }
+  },
+  "interactions": {
+    "hover": "Subtle transform (-translate-y-0.5) on bento dashboard cards. High contrast background shifts on buttons.",
+    "motion": "Use Lenis for smooth scrolling on the marketing page. Use Framer Motion for staggered list entrances in the dashboard.",
+    "accessibility": "Ensure all interactive elements have focus states. Provide `aria-label` for icons (like the green ticks). Support `prefers-reduced-motion`."
+  },
+  "icons": {
+    "library": "lucide-react",
+    "usage": "Use stroke-width 1.5 or 2. Keep icons sharp and legible. Use Phosphor Icons if duotone is needed."
+  },
+  "media": {
+    "hero_image": {
+      "url": "https://images.unsplash.com/photo-1593437886622-34881819f1d7?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1ODR8MHwxfHNlYXJjaHwxfHxwcm9mZXNzaW9uYWwlMjB3cml0aW5nJTIwZW1haWwlMjBsYXB0b3B8ZW58MHx8fHwxNzc3OTg0MDU5fDA&ixlib=rb-4.1.0&q=85",
+      "alt": "Professional typing on laptop",
+      "usage": "Marketing page hero section, half-width or bento grid highlight."
+    },
+    "abstract_background": {
+      "url": "https://images.pexels.com/photos/3137073/pexels-photo-3137073.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "alt": "Minimalistic abstract design featuring white geometric lines",
+      "usage": "Subtle background texture for the marketing page or login screen (use with low opacity overlay)."
+    },
+    "feature_image": {
+      "url": "https://images.unsplash.com/photo-1666618207644-4de0226a3f85?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2Mzl8MHwxfHNlYXJjaHwxfHxtb2Rlcm4lMjB3b3Jrc3BhY2UlMjBtaW5pbWFsaXN0JTIwYXJjaGl0ZWN0dXJlfGVufDB8fHx8MTc3Nzk4NDA1OXww&ixlib=rb-4.1.0&q=85",
+      "alt": "Modern minimal workspace",
+      "usage": "Marketing page feature block to illustrate clean, distraction-free productivity."
+    }
+  },
+  "testing": {
+    "attributes": "All interactive and key informational elements MUST include a `data-testid` attribute (e.g., `data-testid=\"login-button\"`, `data-testid=\"tracking-tick-status\"`)."
+  },
+  "instructions_to_main_agent": [
+    "Build the Landing Page using custom HTML/Tailwind with asymmetrical Tetris grids and overlapping elements.",
+    "Build the Web Dashboard using Shadcn UI components, customizing them to be flat, with 1px crisp borders, removing excessive border-radius.",
+    "Build the Chrome Extension Popup UI as a strictly constrained (max 360px wide) interface with high density but clear hierarchy.",
+    "Implement the email track status with distinct UI states: Default/Sent (Grey Tick), Opened (Green Tick).",
+    "Use the exact color codes provided for the success tick (#10B981) to ensure brand consistency.",
+    "Do not use generic fonts like Inter or Roboto. Follow the provided typography scales strictly."
+  ]
+}

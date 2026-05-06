@@ -1,0 +1,22 @@
+.mt-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 10px;
+  padding: 3px 8px;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 10px;
+  font-weight: 600;
+  background: #0a0a0a;
+  color: #10b981;
+  letter-spacing: 0.08em;
+  border-radius: 0;
+  vertical-align: middle;
+}
+.mt-tick {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+  margin-right: 6px;
+}
+.mt-tick-sent { color: #cbd5e1; }
+.mt-tick-open { color: #10b981; }
