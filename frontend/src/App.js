@@ -1,4 +1,4 @@
-import "@/App.css";
+import "./App.css";
 import { BrowserRouter, Routes, Route, useLocation } from "react-router-dom";
 import { Toaster } from "sonner";
 import { AuthProvider } from "@/lib/AuthContext";

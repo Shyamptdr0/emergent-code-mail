@@ -594,15 +594,16 @@ async def download_extension():
         headers={"Content-Disposition": 'attachment; filename="mailtrack-extension.zip"'},
     )
 
-app.include_router(api_router)
-
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=[o.strip() for o in os.environ.get('CORS_ORIGINS', '').split(',') if o.strip()],
+    allow_origins=[o.strip().strip('"').strip("'") for o in os.environ.get('CORS_ORIGINS', '').split(',') if o.strip()],
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*", "Authorization", "Content-Type", "X-Ext-Key"],
 )
+
+app.include_router(api_router)
+
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
