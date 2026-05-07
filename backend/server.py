@@ -321,6 +321,55 @@ async def mark_notified(tid: str, update: NotifiedUpdate, user: dict = Depends(g
     )
     return {"ok": True}
 
+@api_router.post("/track/{tid}/extension-open")
+async def extension_assisted_open(tid: str, request: Request, user: dict = Depends(get_user_by_ext_key)):
+    """Extension calls this when it detects a tracked email being opened. 
+    This completely bypasses Google Image Proxy caching, allowing 100% accurate multiple opens 
+    if the recipient has the extension installed."""
+    em = await db.tracked_emails.find_one({"id": tid}, {"_id": 0})
+    if not em:
+        return {"ok": False}
+        
+    now = datetime.now(timezone.utc)
+    # Debounce 5 seconds to prevent double-counting with the initial GIP proxy hit
+    last_opened = em.get("last_opened_at")
+    if last_opened:
+        last_dt = datetime.fromisoformat(last_opened) if isinstance(last_opened, str) else last_opened
+        if last_dt.tzinfo is None:
+            last_dt = last_dt.replace(tzinfo=timezone.utc)
+        if (now - last_dt).total_seconds() < 5:
+            return {"ok": "debounced"}
+            
+    ts = now.isoformat()
+    ip = request.client.host if request.client else "unknown"
+    ua = request.headers.get("user-agent", "extension-assisted")
+    
+    # Do not count if sender is viewing their own sent mail
+    self_viewing_raw = em.get("self_viewing_until")
+    if self_viewing_raw:
+        until = datetime.fromisoformat(self_viewing_raw) if isinstance(self_viewing_raw, str) else self_viewing_raw
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
+        if until > now:
+            return {"ok": "self_viewing"}
+            
+    await db.tracked_emails.update_one(
+        {"id": tid},
+        {
+            "$inc": {"open_count": 1},
+            "$set": {"last_opened_at": ts},
+            "$push": {"opens": {"ts": ts, "ua": ua, "ip": ip, "method": "extension"}},
+        },
+    )
+    push_event(em["user_id"], {
+        "type": "open",
+        "tracked_id": tid,
+        "recipient": em["recipient"],
+        "subject": em["subject"],
+        "ts": ts,
+    })
+    return {"ok": True}
+
 @api_router.get("/track/pixel/{tid}.png")
 async def track_pixel(tid: str, request: Request):
     em = await db.tracked_emails.find_one({"id": tid}, {"_id": 0})
