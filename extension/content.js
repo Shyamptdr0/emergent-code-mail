@@ -132,6 +132,38 @@
         if ((ev.ctrlKey || ev.metaKey) && ev.key === "Enter") updateOnSend();
       }, true);
     }
+    enforcePixels();
+  }
+
+  function enforcePixels() {
+    document.querySelectorAll('div[role="dialog"]').forEach(dlg => {
+      const info = STATE.composeMap.get(dlg);
+      if (info && info.tid) {
+        const body = findBody(dlg);
+        if (body) {
+          // 1. Aggressively strip any pixel that doesn't match our current TID
+          const imgs = body.querySelectorAll("img");
+          imgs.forEach(img => {
+            const src = img.src || "";
+            const isTracker = src.includes("mail-tracker-with-new") || 
+                              src.includes("api/track/pixel") || 
+                              img.hasAttribute("data-mt-pixel");
+            
+            if (isTracker && img.getAttribute("data-mt-pixel") !== info.tid) {
+              const wrap = img.closest('.mt-wrapper');
+              if (wrap) wrap.remove();
+              else img.remove();
+            }
+          });
+
+          // 2. Ensure our correct pixel is present
+          if (!body.querySelector(`img[data-mt-pixel="${info.tid}"]`)) {
+            const pixelHtml = `<img src="${info.pixel_url}" width="1" height="1" data-mt-pixel="${info.tid}" style="display:block;width:1px;height:1px;opacity:0;border:0;position:absolute;left:-9999px;" alt="" />`;
+            body.insertAdjacentHTML("beforeend", `<div class="mt-wrapper" style="opacity:0;height:0;overflow:hidden;">${pixelHtml}</div>`);
+          }
+        }
+      }
+    });
   }
 
   // ---------- Render sent-folder ticks ----------
@@ -235,36 +267,6 @@
   // ---------- Main loop ----------
   async function tick() {
     attachToCompose();
-
-    // ENFORCE DOM: Every second, ensure every compose window has exactly ONE correct pixel.
-    document.querySelectorAll('div[role="dialog"]').forEach(dlg => {
-      const info = STATE.composeMap.get(dlg);
-      if (info && info.tid) {
-        const body = findBody(dlg);
-        if (body) {
-          // 1. Aggressively strip any pixel that doesn't match our current TID
-          const imgs = body.querySelectorAll("img");
-          imgs.forEach(img => {
-            const src = img.src || "";
-            const isTracker = src.includes("mail-tracker-with-new") || 
-                              src.includes("api/track/pixel") || 
-                              img.hasAttribute("data-mt-pixel");
-            
-            if (isTracker && img.getAttribute("data-mt-pixel") !== info.tid) {
-              const wrap = img.closest('.mt-wrapper');
-              if (wrap) wrap.remove();
-              else img.remove();
-            }
-          });
-
-          // 2. Ensure our correct pixel is present
-          if (!body.querySelector(`img[data-mt-pixel="${info.tid}"]`)) {
-            const pixelHtml = `<img src="${info.pixel_url}" width="1" height="1" data-mt-pixel="${info.tid}" style="display:block;width:1px;height:1px;opacity:0;border:0;position:absolute;left:-9999px;" alt="" />`;
-            body.insertAdjacentHTML("beforeend", `<div class="mt-wrapper" style="opacity:0;height:0;overflow:hidden;">${pixelHtml}</div>`);
-          }
-        }
-      }
-    });
 
     if (STATE.dead || !isContextAlive()) { STATE.dead = true; return; }
     STATE.config = await getConfig();
