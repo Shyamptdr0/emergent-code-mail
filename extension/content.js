@@ -89,14 +89,8 @@
         }),
       });
 
-      log("tracking created, injecting pixel", res.id);
-      // Inject pixel RIGHT NOW so it's part of the email body before user types/sends
-      const pixelHtml = `<img src="${res.pixel_url}" width="1" height="1" data-mt-pixel="${res.id}" style="display:block;width:1px;height:1px;opacity:0;border:0;position:absolute;left:-9999px;" alt="" />`;
-      
-      // Insert at the end of the body
-      body.insertAdjacentHTML("beforeend", `<div class="mt-wrapper" style="opacity:0;height:0;overflow:hidden;">${pixelHtml}</div>`);
-
-      STATE.composeMap.set(dlg, { tid: res.id });
+      log("tracking created, waiting for send to inject", res.id);
+      STATE.composeMap.set(dlg, { tid: res.id, pixel_url: res.pixel_url });
       return res.id;
     } catch (e) {
       console.error("[MailTrack] create failed", e);
@@ -128,9 +122,20 @@
       const updateOnSend = () => {
         const info = STATE.composeMap.get(dlg);
         if (!info?.tid) return;
+        const body = findBody(dlg);
+        if (!body) return;
+
+        // CRITICAL FIX: Clean up any old tracking pixels AND inject the new one 
+        // RIGHT BEFORE SENDING. This beats any asynchronous draft/signature loading by Gmail.
+        const oldPixels = body.querySelectorAll('.mt-wrapper, img[data-mt-pixel], img[src*="/api/track/pixel/"]');
+        oldPixels.forEach(el => el.remove());
+
+        // Inject the correct pixel for this specific email
+        const pixelHtml = `<img src="${info.pixel_url}" width="1" height="1" data-mt-pixel="${info.tid}" style="display:block;width:1px;height:1px;opacity:0;border:0;position:absolute;left:-9999px;" alt="" />`;
+        body.insertAdjacentHTML("beforeend", `<div class="mt-wrapper" style="opacity:0;height:0;overflow:hidden;">${pixelHtml}</div>`);
+
         const recipient = findTo(dlg) || "unknown";
         const subject = findSubject(dlg) || "(no subject)";
-        const body = findBody(dlg);
         const preview = (body?.innerText || "").slice(0, 140);
         api(`/api/track/update/${info.tid}`, {
           method: "POST",
