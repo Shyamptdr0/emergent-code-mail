@@ -359,9 +359,9 @@ async def track_pixel(tid: str, request: Request):
         is_image_proxy = ("GoogleImageProxy" in ua) or ("ggpht.com" in ua)
 
         is_scan = (
-            seconds_since_send < 5                      # 5s grace covers immediate Gmail scan
+            seconds_since_send < 10                     # 10s grace covers immediate Gmail scan
             or is_self_viewing                          # explicit thread-view ping from extension
-            # or (sender_ip and ip and sender_ip == ip) # Temporarily disabled for local testing
+            # or (sender_ip and ip and sender_ip == ip) # Disabled so user can test between accounts on same device
             or (is_google_scanner_ip and not is_image_proxy)
             or "Google-Read-Aloud" in ua
             or "GoogleSafetyCenter" in ua

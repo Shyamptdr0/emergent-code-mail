@@ -213,6 +213,14 @@
 
   function detectSelfViewing() {
     try {
+      // Only mark as self-viewing if we are in a "Sent" context
+      const isSentContext = window.location.hash.includes("sent") || 
+                           window.location.hash.includes("label/sent") ||
+                           document.querySelector('.nZ') || // Sent label active in sidebar
+                           window.location.href.includes("sent");
+      
+      if (!isSentContext) return;
+
       // Thread view — subject in opened conversation header
       const h2 = document.querySelector("h2[data-thread-perm-id], .hP");
       if (h2) {
@@ -220,16 +228,12 @@
         const match = STATE.sentMap[subject];
         if (match) markViewing(match.id);
       }
-      // Row preview opened inline
-      const openRow = document.querySelector("tr.zA.btb");
-      if (openRow) {
-        const subjEl = openRow.querySelector(".bog") || openRow.querySelector(".y6 span");
-        const subject = normalizeSubject(subjEl?.innerText);
-        const match = STATE.sentMap[subject];
-        if (match) markViewing(match.id);
-      }
     } catch (e) {}
   }
+
+  // Monitor for self-viewing only in sent context
+  setInterval(detectSelfViewing, 2000); 
+
 
 
   // ---------- Main loop ----------
