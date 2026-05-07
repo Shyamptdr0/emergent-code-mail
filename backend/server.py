@@ -314,8 +314,9 @@ async def track_pixel(tid: str, request: Request):
         if em.get("status") == "draft":
             headers = {
                 "Content-Type": "image/png",
-                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
                 "Pragma": "no-cache",
+                "Expires": "0",
             }
             return FastResponse(content=PIXEL_PNG, media_type="image/png", headers=headers)
 
@@ -395,8 +396,9 @@ async def track_pixel(tid: str, request: Request):
 
     headers = {
         "Content-Type": "image/png",
-        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
         "Pragma": "no-cache",
+        "Expires": "0",
     }
     return FastResponse(content=PIXEL_PNG, media_type="image/png", headers=headers)
 
