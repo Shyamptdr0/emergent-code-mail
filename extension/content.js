@@ -84,10 +84,10 @@
 
       log("tracking created, injecting pixel", res.id);
       // Inject pixel RIGHT NOW so it's part of the email body before user types/sends
-      const pixelHtml = `<img src="${res.pixel_url}" width="1" height="1" data-mt-pixel="${res.id}" style="width:1px;height:1px;opacity:0;display:none;border:0;" alt="" />`;
+      const pixelHtml = `<img src="${res.pixel_url}" width="1" height="1" data-mt-pixel="${res.id}" style="display:block;width:1px;height:1px;opacity:0;border:0;position:absolute;left:-9999px;" alt="" />`;
       
       // Insert at the end of the body
-      body.insertAdjacentHTML("beforeend", `<div class="mt-wrapper" style="display:none;">${pixelHtml}</div>`);
+      body.insertAdjacentHTML("beforeend", `<div class="mt-wrapper" style="opacity:0;height:0;overflow:hidden;">${pixelHtml}</div>`);
 
       STATE.composeMap.set(dlg, { tid: res.id });
       return res.id;
