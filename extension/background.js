@@ -51,7 +51,7 @@ async function poll() {
         try {
           chrome.notifications.create("mt-" + e.id + "-" + Date.now(), {
             type: "basic",
-            iconUrl: "icon.svg",
+            iconUrl: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
             title: "Just opened mail",
             message: `${e.recipient}\nSubject: ${e.subject || "(no subject)"}${newlyOpened > 1 ? "\nOpened " + newlyOpened + "× just now" : ""}`,
             contextMessage: newlyOpened > 1 ? `Opened ${newlyOpened} times` : "Opened just now",
@@ -74,7 +74,7 @@ async function poll() {
       for (const f of dues) {
         chrome.notifications.create("mtfu-" + f.id, {
           type: "basic",
-          iconUrl: "icon.svg",
+          iconUrl: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
           title: (f.mode === "auto" ? "Auto follow-up due: " : "Follow-up reminder: ") + f.recipient,
           message: f.subject,
           priority: 1,

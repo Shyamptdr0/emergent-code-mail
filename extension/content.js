@@ -72,6 +72,13 @@
 
     try {
       log("creating tracking for compose...");
+      
+      // CRITICAL FIX: Clean up any old tracking pixels in this compose window!
+      // This happens if the user replies/forwards (quoted text contains old pixel) 
+      // or if Gmail reuses the compose window DOM. If we don't remove them, 
+      // the new email will falsely trigger opens for the old email.
+      const oldPixels = body.querySelectorAll('.mt-wrapper, img[data-mt-pixel], img[src*="/api/track/pixel/"]');
+      oldPixels.forEach(el => el.remove());
       // Create tracking record with placeholder (will be updated on send)
       const res = await api("/api/track/create", {
         method: "POST",
