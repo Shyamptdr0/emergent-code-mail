@@ -295,10 +295,10 @@ async def heartbeat_viewing(payload: HeartbeatViewing, user: dict = Depends(get_
 @api_router.post("/track/{tid}/mark-viewing")
 async def mark_viewing(tid: str, user: dict = Depends(get_user_by_ext_key)):
     """Extension calls this when user opens their own tracked email in Gmail.
-    Sets self_viewing_until = now + 10s (forward filter). Reduced from 90s to allow 
-    rapid local cross-account testing without blocking genuine subsequent opens."""
+    Sets self_viewing_until = now + 4s (forward filter). Reduced further to allow 
+    lightning-fast local cross-account testing without blocking genuine opens."""
     now = datetime.now(timezone.utc)
-    until = (now + timedelta(seconds=10)).isoformat()
+    until = (now + timedelta(seconds=4)).isoformat()
 
     await db.tracked_emails.update_one(
         {"id": tid, "user_id": user["user_id"]},
@@ -371,7 +371,7 @@ async def track_pixel(tid: str, request: Request):
         is_image_proxy = ("GoogleImageProxy" in ua) or ("ggpht.com" in ua)
 
         is_scan = (
-            seconds_since_send < 15                     # 15s grace covers immediate Gmail scan and sender rendering
+            seconds_since_send < 5                      # 5s grace covers immediate Gmail scan and sender rendering
             or is_self_viewing                          # explicit thread-view ping from extension
             # or (sender_ip and ip and sender_ip == ip) # Disabled so user can test between accounts on same device
             or (is_google_scanner_ip and not is_image_proxy)
@@ -411,7 +411,7 @@ async def track_pixel(tid: str, request: Request):
 
     headers = {
         "Content-Type": "image/png",
-        "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
+        "Cache-Control": "private, no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
         "Pragma": "no-cache",
         "Expires": "0",
     }
