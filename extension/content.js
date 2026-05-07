@@ -66,20 +66,13 @@
 
   // ---------- Create tracking + inject pixel immediately when compose opens ----------
   async function ensureTrackingForCompose(dlg) {
-    if (STATE.composeMap.has(dlg)) return STATE.composeMap.get(dlg);
-    const body = findBody(dlg);
-    if (!body) return null;
+    if (STATE.composeMap.has(dlg)) return STATE.composeMap.get(dlg).tid;
+    
+    // Mark as pending to avoid parallel calls
+    STATE.composeMap.set(dlg, { pending: true });
 
     try {
       log("creating tracking for compose...");
-      
-      // CRITICAL FIX: Clean up any old tracking pixels in this compose window!
-      // This happens if the user replies/forwards (quoted text contains old pixel) 
-      // or if Gmail reuses the compose window DOM. If we don't remove them, 
-      // the new email will falsely trigger opens for the old email.
-      const oldPixels = body.querySelectorAll('.mt-wrapper, img[data-mt-pixel], img[src*="/api/track/pixel/"]');
-      oldPixels.forEach(el => el.remove());
-      // Create tracking record with placeholder (will be updated on send)
       const res = await api("/api/track/create", {
         method: "POST",
         body: JSON.stringify({
@@ -89,11 +82,12 @@
         }),
       });
 
-      log("tracking created, waiting for send to inject", res.id);
+      log("tracking created, storing state", res.id);
       STATE.composeMap.set(dlg, { tid: res.id, pixel_url: res.pixel_url });
       return res.id;
     } catch (e) {
       console.error("[MailTrack] create failed", e);
+      STATE.composeMap.delete(dlg);
       return null;
     }
   }
@@ -122,18 +116,8 @@
       const updateOnSend = () => {
         const info = STATE.composeMap.get(dlg);
         if (!info?.tid) return;
+        
         const body = findBody(dlg);
-        if (!body) return;
-
-        // CRITICAL FIX: Clean up any old tracking pixels AND inject the new one 
-        // RIGHT BEFORE SENDING. This beats any asynchronous draft/signature loading by Gmail.
-        const oldPixels = body.querySelectorAll('.mt-wrapper, img[data-mt-pixel], img[src*="/api/track/pixel/"]');
-        oldPixels.forEach(el => el.remove());
-
-        // Inject the correct pixel for this specific email
-        const pixelHtml = `<img src="${info.pixel_url}" width="1" height="1" data-mt-pixel="${info.tid}" style="display:block;width:1px;height:1px;opacity:0;border:0;position:absolute;left:-9999px;" alt="" />`;
-        body.insertAdjacentHTML("beforeend", `<div class="mt-wrapper" style="opacity:0;height:0;overflow:hidden;">${pixelHtml}</div>`);
-
         const recipient = findTo(dlg) || "unknown";
         const subject = findSubject(dlg) || "(no subject)";
         const preview = (body?.innerText || "").slice(0, 140);
@@ -250,6 +234,38 @@
 
   // ---------- Main loop ----------
   async function tick() {
+    attachToCompose();
+
+    // ENFORCE DOM: Every second, ensure every compose window has exactly ONE correct pixel.
+    document.querySelectorAll('div[role="dialog"]').forEach(dlg => {
+      const info = STATE.composeMap.get(dlg);
+      if (info && info.tid) {
+        const body = findBody(dlg);
+        if (body) {
+          // 1. Aggressively strip any pixel that doesn't match our current TID
+          const imgs = body.querySelectorAll("img");
+          imgs.forEach(img => {
+            const src = img.src || "";
+            const isTracker = src.includes("mail-tracker-with-new") || 
+                              src.includes("api/track/pixel") || 
+                              img.hasAttribute("data-mt-pixel");
+            
+            if (isTracker && img.getAttribute("data-mt-pixel") !== info.tid) {
+              const wrap = img.closest('.mt-wrapper');
+              if (wrap) wrap.remove();
+              else img.remove();
+            }
+          });
+
+          // 2. Ensure our correct pixel is present
+          if (!body.querySelector(`img[data-mt-pixel="${info.tid}"]`)) {
+            const pixelHtml = `<img src="${info.pixel_url}" width="1" height="1" data-mt-pixel="${info.tid}" style="display:block;width:1px;height:1px;opacity:0;border:0;position:absolute;left:-9999px;" alt="" />`;
+            body.insertAdjacentHTML("beforeend", `<div class="mt-wrapper" style="opacity:0;height:0;overflow:hidden;">${pixelHtml}</div>`);
+          }
+        }
+      }
+    });
+
     if (STATE.dead || !isContextAlive()) { STATE.dead = true; return; }
     STATE.config = await getConfig();
     if (STATE.dead) return;
