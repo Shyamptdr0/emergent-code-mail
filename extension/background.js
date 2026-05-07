@@ -24,6 +24,25 @@ async function broadcastToGmailTabs(payload) {
   });
 }
 
+const recentNotifications = new Set();
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.type === "SHOW_INSTANT_NOTIFICATION") {
+    const key = msg.tracked_id;
+    if (recentNotifications.has(key)) return;
+    recentNotifications.add(key);
+    setTimeout(() => recentNotifications.delete(key), 2000);
+
+    chrome.notifications.create("mt-inst-" + key + "-" + Date.now(), {
+      type: "basic",
+      iconUrl: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+      title: msg.title,
+      message: msg.message,
+      priority: 2,
+      requireInteraction: false
+    });
+  }
+});
+
 async function poll() {
   const cfg = await new Promise((res) =>
     chrome.storage.sync.get(["backend_url", "ext_api_key"], (v) => res(v))

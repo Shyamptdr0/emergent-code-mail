@@ -107,7 +107,8 @@ async def get_current_user(request: Request, authorization: Optional[str] = Head
         raise HTTPException(status_code=401, detail="User not found")
     return user
 
-async def get_user_by_ext_key(x_ext_key: Optional[str] = Header(None)) -> dict:
+async def get_user_by_ext_key(request: Request) -> dict:
+    x_ext_key = request.headers.get("X-Ext-Key") or request.query_params.get("key")
     if not x_ext_key:
         raise HTTPException(status_code=401, detail="Missing extension key")
     user = await db.users.find_one({"ext_api_key": x_ext_key}, {"_id": 0})
@@ -430,6 +431,31 @@ async def list_emails_ext(user: dict = Depends(get_user_by_ext_key)):
         {"user_id": user["user_id"]}, {"_id": 0, "opens": 0}
     ).sort("sent_at", -1).to_list(100)
     return rows
+
+@api_router.get("/stream")
+async def sse_stream(request: Request, user: dict = Depends(get_user_by_ext_key)):
+    user_id = user["user_id"]
+    q = asyncio.Queue()
+    queues = event_queues.setdefault(user_id, [])
+    queues.append(q)
+
+    async def event_generator():
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    payload = await asyncio.wait_for(q.get(), timeout=15.0)
+                    yield f"data: {json.dumps(payload)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if q in queues:
+                queues.remove(q)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @api_router.get("/emails/{eid}")
 async def email_detail(eid: str, user: dict = Depends(get_current_user)):

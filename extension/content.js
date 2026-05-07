@@ -276,6 +276,38 @@
     await loadEmails();
     renderTicks();
     detectSelfViewing();
+    connectSSE();
+  }
+
+  let eventSource = null;
+  function connectSSE() {
+    if (eventSource) return;
+    if (!STATE.config?.backend_url || !STATE.config?.ext_api_key) return;
+    
+    const url = `${STATE.config.backend_url}/api/stream?key=${STATE.config.ext_api_key}`;
+    eventSource = new EventSource(url);
+    
+    eventSource.onmessage = (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (data.type === "open") {
+          // Tell background to show notification instantly
+          chrome.runtime.sendMessage({
+            type: "SHOW_INSTANT_NOTIFICATION",
+            tracked_id: data.tracked_id,
+            title: "Just opened mail",
+            message: `${data.recipient}\nSubject: ${data.subject || "(no subject)"}`
+          });
+          // Also update local ticks immediately
+          loadEmails().then(renderTicks);
+        }
+      } catch(err) {}
+    };
+    
+    eventSource.onerror = () => {
+      eventSource.close();
+      eventSource = null;
+    };
   }
 
   const obs = new MutationObserver(() => {
