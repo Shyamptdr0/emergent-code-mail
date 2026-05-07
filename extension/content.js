@@ -117,7 +117,7 @@
       }
 
       // Inject pixel NOW (not on send)
-      await ensureTrackingForCompose(dlg);
+      ensureTrackingForCompose(dlg);
 
       // On send, update tracking with real recipient/subject (fire-and-forget)
       const updateOnSend = () => {
@@ -138,7 +138,15 @@
         STATE.composeMap.delete(dlg);
         delete dlg.dataset.mtAttached;
       };
-      sendBtn.addEventListener("click", updateOnSend, true);
+      
+      // Use delegated listener on the dialog to survive Gmail replacing the Send button DOM
+      dlg.addEventListener("click", (ev) => {
+        const btn = findSendButton(dlg);
+        if (btn && (ev.target === btn || btn.contains(ev.target))) {
+          updateOnSend();
+        }
+      }, true);
+      
       dlg.addEventListener("keydown", (ev) => {
         if ((ev.ctrlKey || ev.metaKey) && ev.key === "Enter") updateOnSend();
       }, true);
@@ -156,9 +164,16 @@
           const imgs = body.querySelectorAll("img");
           imgs.forEach(img => {
             const src = img.src || "";
+            const style = (img.getAttribute("style") || "").replace(/\s/g, "").toLowerCase();
+            
+            // CRITICAL FIX: Google Image Proxy completely hides the original URL in quoted replies.
+            // To guarantee old pixels are removed, we delete ANY 1x1 image or any image with left:-9999px
+            // that doesn't belong to the current tracking ID.
             const isTracker = src.includes("mail-tracker-with-new") || 
                               src.includes("api/track/pixel") || 
-                              img.hasAttribute("data-mt-pixel");
+                              img.hasAttribute("data-mt-pixel") ||
+                              style.includes("left:-9999px") ||
+                              (img.getAttribute("width") === "1" && img.getAttribute("height") === "1");
             
             if (isTracker && img.getAttribute("data-mt-pixel") !== info.tid) {
               const wrap = img.closest('.mt-wrapper');
