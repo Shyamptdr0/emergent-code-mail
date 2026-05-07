@@ -2,16 +2,13 @@
 // AND broadcasts "open" events to all Gmail tabs for in-page toast UI.
 
 const POLL_ALARM = "mt-poll";
-let lastSeen = {}; // id -> open_count
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.alarms.create(POLL_ALARM, { periodInMinutes: 0.17 }); // every ~10 seconds
-  chrome.storage.local.get(["lastSeen"], (v) => { lastSeen = v.lastSeen || {}; });
 });
 
 chrome.runtime.onStartup?.addListener(() => {
   chrome.alarms.create(POLL_ALARM, { periodInMinutes: 0.17 });
-  chrome.storage.local.get(["lastSeen"], (v) => { lastSeen = v.lastSeen || {}; });
 });
 
 chrome.alarms.onAlarm.addListener((a) => { if (a.name === POLL_ALARM) poll(); });
@@ -40,14 +37,10 @@ async function poll() {
     if (!r.ok) return;
     const list = await r.json();
 
-    list.forEach((e) => {
-      const prev = lastSeen[e.id];
-      if (typeof prev === "undefined") {
-        lastSeen[e.id] = e.open_count;
-        return;
-      }
-      if (e.open_count > prev) {
-        const newlyOpened = e.open_count - prev;
+    list.forEach(async (e) => {
+      const notified = e.notified_count || 0;
+      if (e.open_count > notified) {
+        const newlyOpened = e.open_count - notified;
         try {
           chrome.notifications.create("mt-" + e.id + "-" + Date.now(), {
             type: "basic",
@@ -59,11 +52,19 @@ async function poll() {
             requireInteraction: false,
             silent: false,
           });
+          
+          // Tell the backend we have notified up to this count
+          await fetch(`${cfg.backend_url}/api/track/${e.id}/mark-notified`, {
+            method: "POST",
+            headers: { 
+              "Content-Type": "application/json", 
+              "X-Ext-Key": cfg.ext_api_key 
+            },
+            body: JSON.stringify({ count: e.open_count })
+          });
         } catch (err) { console.warn("notification failed", err); }
-        lastSeen[e.id] = e.open_count;
       }
     });
-    chrome.storage.local.set({ lastSeen });
 
     // Due follow-ups notification
     const fr = await fetch(cfg.backend_url + "/api/follow-ups/due", {

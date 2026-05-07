@@ -307,6 +307,19 @@ async def mark_viewing(tid: str, user: dict = Depends(get_user_by_ext_key)):
     )
     return {"ok": True, "self_viewing_until": until}
 
+from pydantic import BaseModel
+class NotifiedUpdate(BaseModel):
+    count: int
+
+@api_router.post("/track/{tid}/mark-notified")
+async def mark_notified(tid: str, update: NotifiedUpdate, user: dict = Depends(get_user_by_ext_key)):
+    """Extension calls this to record that it has shown a desktop notification up to a certain open count."""
+    await db.tracked_emails.update_one(
+        {"id": tid, "user_id": user["user_id"]},
+        {"$set": {"notified_count": update.count}}
+    )
+    return {"ok": True}
+
 @api_router.get("/track/pixel/{tid}.png")
 async def track_pixel(tid: str, request: Request):
     em = await db.tracked_emails.find_one({"id": tid}, {"_id": 0})
