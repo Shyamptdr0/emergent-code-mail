@@ -15,6 +15,8 @@ from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
 import httpx
+from google.oauth2 import id_token
+from google.auth.transport import requests as google_requests
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -65,12 +67,15 @@ class TrackedEmail(BaseModel):
     open_count: int = 0
     last_opened_at: Optional[str] = None
     opens: List[Dict[str, Any]] = []
+    replied: bool = False
+    follow_up_count: int = 0
 
 class FollowUpCreate(BaseModel):
     tracked_email_id: str
     message: str
     days_delay: int = 3
     mode: str = "manual"  # 'manual' or 'auto'
+    trigger_condition: str = "always" # 'always', 'if_not_opened', 'if_not_replied'
 
 class FollowUp(BaseModel):
     id: str
@@ -84,6 +89,24 @@ class FollowUp(BaseModel):
     mode: str
     sent: bool = False
     sent_at: Optional[str] = None
+    trigger_condition: str = "always"
+
+class AutomationStage(BaseModel):
+    trigger: str
+    days: int
+    time: str # 'HH:MM'
+    message: str
+
+class AutomationRuleCreate(BaseModel):
+    name: str
+    stages: List[AutomationStage]
+
+class AutomationRule(BaseModel):
+    id: str
+    user_id: str
+    name: str
+    stages: List[AutomationStage]
+    created_at: str
 
 # ---------- Auth helpers ----------
 async def get_current_user(request: Request, authorization: Optional[str] = Header(None)) -> dict:
@@ -117,23 +140,40 @@ async def get_user_by_ext_key(request: Request) -> dict:
     return user
 
 # ---------- Auth endpoints ----------
-class SessionExchange(BaseModel):
-    session_id: str
+class GoogleAuth(BaseModel):
+    token: str
 
-@api_router.post("/auth/session")
-async def auth_session(payload: SessionExchange, response: Response):
-    async with httpx.AsyncClient(timeout=10) as http:
-        r = await http.get(
-            "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
-            headers={"X-Session-ID": payload.session_id},
+@api_router.post("/auth/google")
+async def auth_google(payload: GoogleAuth, response: Response):
+    client_id = os.environ.get("GOOGLE_CLIENT_ID")
+    if not client_id:
+        raise HTTPException(status_code=500, detail="Backend GOOGLE_CLIENT_ID not configured in .env")
+
+    try:
+        # Verify the JWT token from Google
+        idinfo = id_token.verify_oauth2_token(
+            payload.token, 
+            google_requests.Request(), 
+            client_id
         )
-    if r.status_code != 200:
-        raise HTTPException(status_code=401, detail="Invalid session_id")
-    data = r.json()
-    email = data["email"]
-    name = data.get("name", email)
-    picture = data.get("picture")
-    session_token = data["session_token"]
+        
+        email = idinfo["email"]
+        name = idinfo.get("name", email)
+        picture = idinfo.get("picture")
+        
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Invalid Google token")
+
+class GoogleNativeAuth(BaseModel):
+    email: str
+    name: Optional[str] = None
+    picture: Optional[str] = None
+
+@api_router.post("/auth/google-native")
+async def auth_google_native(payload: GoogleNativeAuth, response: Response):
+    email = payload.email
+    name = payload.name or email
+    picture = payload.picture
 
     existing = await db.users.find_one({"email": email}, {"_id": 0})
     if existing:
@@ -155,6 +195,7 @@ async def auth_session(payload: SessionExchange, response: Response):
             "created_at": datetime.now(timezone.utc).isoformat(),
         })
 
+    session_token = secrets.token_urlsafe(32)
     expires_at = datetime.now(timezone.utc) + timedelta(days=7)
     await db.user_sessions.insert_one({
         "user_id": user_id,
@@ -172,6 +213,7 @@ async def auth_session(payload: SessionExchange, response: Response):
         "user_id": user_id, "email": email, "name": name,
         "picture": picture, "ext_api_key": ext_api_key,
     }
+
 
 @api_router.get("/auth/me")
 async def auth_me(user: dict = Depends(get_current_user)):
@@ -223,6 +265,8 @@ async def create_tracked(payload: TrackCreate, request: Request, user: dict = De
         "last_opened_at": None,
         "opens": [],
         "scans": [],
+        "replied": False,
+        "follow_up_count": 0,
     }
     await db.tracked_emails.insert_one(doc)
     proto = request.headers.get("x-forwarded-proto", request.url.scheme)
@@ -248,10 +292,59 @@ async def update_tracked(tid: str, payload: TrackUpdate, user: dict = Depends(ge
             {"id": tid, "user_id": user["user_id"]},
             {"$set": updates},
         )
+        
+        # Apply Automation Sequences
+        rules = await db.automation_rules.find({"user_id": user["user_id"]}).to_list(100)
+        sent_at = datetime.now(timezone.utc)
+        
+        for rule in rules:
+            cumulative_days = 0
+            for idx, stage in enumerate(rule["stages"]):
+                cumulative_days += stage["days"]
+                
+                # Calculate scheduled time: cumulative days + target time
+                target_time = stage["time"].split(":")
+                hour = int(target_time[0])
+                minute = int(target_time[1])
+                
+                scheduled = (sent_at + timedelta(days=cumulative_days)).replace(
+                    hour=hour, minute=minute, second=0, microsecond=0
+                )
+                
+                await _create_fup(
+                    tid, 
+                    stage["message"], 
+                    cumulative_days, 
+                    "auto", 
+                    f"if_{stage['trigger']}", 
+                    user["user_id"],
+                    custom_scheduled_at=scheduled
+                )
+
     return {"ok": True}
 
 class HeartbeatViewing(BaseModel):
     tracked_ids: List[str]
+
+@api_router.post("/track/{tid}/mark-replied")
+async def mark_replied(tid: str, user: dict = Depends(get_user_by_ext_key)):
+    """Extension or Dashboard calls this to mark replied and stop sequences."""
+    await db.tracked_emails.update_one(
+        {"id": tid, "user_id": user["user_id"]},
+        {"$set": {"replied": True}}
+    )
+    # Cancel pending follow-ups
+    await db.follow_ups.delete_many({
+        "tracked_email_id": tid,
+        "user_id": user["user_id"],
+        "sent": False
+    })
+    return {"ok": True}
+
+@api_router.get("/emails/active")
+async def list_active_mails(user: dict = Depends(get_current_user)):
+    """Return only emails that have been replied to."""
+    return await db.tracked_emails.find({"user_id": user["user_id"], "replied": True}, {"_id": 0}).to_list(100)
 
 @api_router.post("/track/heartbeat-viewing")
 async def heartbeat_viewing(payload: HeartbeatViewing, user: dict = Depends(get_user_by_ext_key)):
@@ -540,32 +633,94 @@ async def stats(user: dict = Depends(get_current_user)):
 # ---------- Follow-ups ----------
 @api_router.post("/follow-ups")
 async def create_follow_up(payload: FollowUpCreate, user: dict = Depends(get_current_user)):
-    em = await db.tracked_emails.find_one(
-        {"id": payload.tracked_email_id, "user_id": user["user_id"]}, {"_id": 0}
-    )
+    return await _create_fup(payload.tracked_email_id, payload.message, payload.days_delay, payload.mode, payload.trigger_condition, user["user_id"])
+
+class BulkFollowUpCreate(BaseModel):
+    tracked_email_ids: List[str]
+    message: str
+    days_delay: int = 3
+    mode: str = "manual"
+    trigger_condition: str = "always"
+
+@api_router.post("/follow-ups/bulk")
+async def bulk_create_follow_up(payload: BulkFollowUpCreate, user: dict = Depends(get_current_user)):
+    results = []
+    for eid in payload.tracked_email_ids:
+        try:
+            res = await _create_fup(eid, payload.message, payload.days_delay, payload.mode, payload.trigger_condition, user["user_id"])
+            results.append(res)
+        except Exception:
+            continue
+    return results
+
+async def _create_fup(eid, message, days, mode, condition, user_id, custom_scheduled_at=None):
+    em = await db.tracked_emails.find_one({"id": eid, "user_id": user_id}, {"_id": 0})
     if not em:
         raise HTTPException(404, "Tracked email not found")
+    
     fid = uuid.uuid4().hex
-    sent_at = datetime.fromisoformat(em["sent_at"]) if isinstance(em["sent_at"], str) else em["sent_at"]
-    if sent_at.tzinfo is None:
-        sent_at = sent_at.replace(tzinfo=timezone.utc)
-    scheduled = sent_at + timedelta(days=payload.days_delay)
+    if custom_scheduled_at:
+        scheduled = custom_scheduled_at
+    else:
+        sent_at = datetime.fromisoformat(em["sent_at"]) if isinstance(em["sent_at"], str) else em["sent_at"]
+        if sent_at.tzinfo is None:
+            sent_at = sent_at.replace(tzinfo=timezone.utc)
+        scheduled = sent_at + timedelta(days=days)
+    
     doc = {
         "id": fid,
-        "user_id": user["user_id"],
-        "tracked_email_id": payload.tracked_email_id,
+        "user_id": user_id,
+        "tracked_email_id": eid,
         "recipient": em["recipient"],
         "subject": em["subject"],
-        "message": payload.message,
-        "days_delay": payload.days_delay,
+        "message": message,
+        "days_delay": days,
         "scheduled_at": scheduled.isoformat(),
-        "mode": payload.mode,
+        "mode": mode,
+        "trigger_condition": condition,
         "sent": False,
         "sent_at": None,
     }
     await db.follow_ups.insert_one(doc)
     doc.pop("_id", None)
-    return {k: v for k, v in doc.items()}
+    return doc
+
+# ---------- Automation Rules ----------
+@api_router.post("/automation-rules")
+async def create_rule(payload: AutomationRuleCreate, user: dict = Depends(get_current_user)):
+    rid = uuid.uuid4().hex
+    doc = {
+        "id": rid,
+        "user_id": user["user_id"],
+        "name": payload.name,
+        "stages": [s.model_dump() for s in payload.stages],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.automation_rules.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+@api_router.get("/automation-rules")
+async def list_rules(user: dict = Depends(get_current_user)):
+    return await db.automation_rules.find({"user_id": user["user_id"]}, {"_id": 0}).to_list(100)
+
+@api_router.put("/automation-rules/{rid}")
+async def update_rule(rid: str, payload: AutomationRuleCreate, user: dict = Depends(get_current_user)):
+    res = await db.automation_rules.update_one(
+        {"id": rid, "user_id": user["user_id"]},
+        {"$set": {
+            "name": payload.name,
+            "stages": [s.model_dump() for s in payload.stages],
+        }}
+    )
+    if res.matched_count == 0:
+        raise HTTPException(404, "Not found")
+    return {"ok": True}
+
+@api_router.delete("/automation-rules/{rid}")
+async def delete_rule(rid: str, user: dict = Depends(get_current_user)):
+    await db.automation_rules.delete_one({"id": rid, "user_id": user["user_id"]})
+    return {"ok": True}
 
 @api_router.get("/follow-ups")
 async def list_follow_ups(user: dict = Depends(get_current_user)):
@@ -593,6 +748,14 @@ async def mark_sent(fid: str, user: dict = Depends(get_current_user)):
     )
     if res.matched_count == 0:
         raise HTTPException(404, "Not found")
+    
+    # Increment follow_up_count on parent email
+    fup = await db.follow_ups.find_one({"id": fid})
+    if fup:
+        await db.tracked_emails.update_one(
+            {"id": fup["tracked_email_id"]},
+            {"$inc": {"follow_up_count": 1}}
+        )
     return {"ok": True}
 
 @api_router.post("/follow-ups/{fid}/mark-sent-ext")
@@ -601,6 +764,13 @@ async def mark_sent_ext(fid: str, user: dict = Depends(get_user_by_ext_key)):
         {"id": fid, "user_id": user["user_id"]},
         {"$set": {"sent": True, "sent_at": datetime.now(timezone.utc).isoformat()}},
     )
+    # Increment follow_up_count on parent email
+    fup = await db.follow_ups.find_one({"id": fid})
+    if fup:
+        await db.tracked_emails.update_one(
+            {"id": fup["tracked_email_id"]},
+            {"$inc": {"follow_up_count": 1}}
+        )
     return {"ok": True}
 
 @api_router.delete("/follow-ups/{fid}")
@@ -698,3 +868,5 @@ logger = logging.getLogger(__name__)
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
+
+# Force uvicorn reload to pick up .env changes

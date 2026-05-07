@@ -22,11 +22,7 @@ api.interceptors.response.use(
   }
 );
 
-export const login = () => {
-  // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
-  const redirectUrl = window.location.origin + "/dashboard";
-  window.location.href = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(redirectUrl)}`;
-};
+
 
 export const logout = async () => {
   try { await api.post("/auth/logout"); } catch (e) {}

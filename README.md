@@ -29,7 +29,8 @@ A Mailsuite/Mailtrack-style email tracking tool built on React + FastAPI + Mongo
 ### 1. Backend
 ```bash
 cd backend
-python -m venv .venv && source .venv/bin/activate
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 # set backend/.env
 # MONGO_URL=mongodb://localhost:27017

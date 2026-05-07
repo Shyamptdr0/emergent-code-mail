@@ -63,7 +63,7 @@ export default function Dashboard() {
         <h1 className="text-4xl sm:text-5xl tracking-tighter font-black">{user?.name?.split(" ")[0] || "there"} — here's your inbox pulse.</h1>
       </div>
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4" data-testid="stats-grid">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4" data-testid="stats-grid">
         <Stat icon={<Mail className="w-4 h-4" />} label="Sent" value={stats?.total_sent ?? "—"} testid="stat-sent" />
         <Stat icon={<Eye className="w-4 h-4" />} label="Opened" value={stats?.total_opened ?? "—"} testid="stat-opened" />
         <Stat icon={<TrendingUp className="w-4 h-4" />} label="Open rate" value={stats ? `${stats.open_rate}%` : "—"} testid="stat-rate" />
@@ -71,7 +71,7 @@ export default function Dashboard() {
       </div>
 
       <div>
-        <div className="flex items-center justify-between mb-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between mb-4 gap-2">
           <h2 className="text-2xl tracking-tight font-bold">Recent tracked emails</h2>
           <Link to="/emails" className="text-sm font-medium underline underline-offset-4" data-testid="see-all-link">See all</Link>
         </div>
@@ -118,7 +118,7 @@ export default function Dashboard() {
 
 function Stat({ icon, label, value, testid }) {
   return (
-    <div className="bg-white border border-slate-200 p-6" data-testid={testid}>
+    <div className="bg-white border border-slate-200 p-4 sm:p-6" data-testid={testid}>
       <div className="flex items-center gap-2 text-slate-500 mb-3">
         {icon}
         <span className="text-xs tracking-[0.2em] uppercase font-bold">{label}</span>

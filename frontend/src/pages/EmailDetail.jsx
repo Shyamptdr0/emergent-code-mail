@@ -3,7 +3,21 @@ import { useNavigate, useParams } from "react-router-dom";
 import { CheckCheck, ArrowLeft, Trash2, Send } from "lucide-react";
 import { api } from "../lib/api";
 import { Button } from "../components/ui/button";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger } from "../components/ui/dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+  DialogTrigger,
+} from "../components/ui/dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../components/ui/select";
 import { Input } from "../components/ui/input";
 import { Textarea } from "../components/ui/textarea";
 import { Label } from "../components/ui/label";
@@ -21,6 +35,7 @@ export default function EmailDetail() {
   const [days, setDays] = useState(3);
   const [msg, setMsg] = useState("");
   const [mode, setMode] = useState("manual");
+  const [condition, setCondition] = useState("always");
   const [open, setOpen] = useState(false);
 
   const load = useCallback(() => api.get(`/emails/${id}`).then(({ data }) => setEm(data)), [id]);
@@ -39,6 +54,7 @@ export default function EmailDetail() {
       message: msg,
       days_delay: Number(days),
       mode,
+      trigger_condition: condition,
     });
     toast.success("Follow-up scheduled");
     setOpen(false);
@@ -53,9 +69,9 @@ export default function EmailDetail() {
         <ArrowLeft className="w-4 h-4" /> Back
       </button>
 
-      <div className="bg-white border border-slate-200 p-8">
-        <div className="flex items-start justify-between gap-4">
-          <div className="min-w-0">
+      <div className="bg-white border border-slate-200 p-4 sm:p-8">
+        <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
+          <div className="min-w-0 flex-1">
             <div className="flex items-center gap-3 mb-3">
               <CheckCheck
                 className={`w-6 h-6 shrink-0 ${em.open_count > 0 ? "text-[#10B981]" : "text-slate-300"}`}
@@ -65,63 +81,86 @@ export default function EmailDetail() {
                 {em.open_count > 0 ? "Opened" : "Not yet opened"}
               </span>
             </div>
-            <h1 className="text-3xl tracking-tighter font-black break-words">{em.subject || "(no subject)"}</h1>
+            <h1 className="text-3xl tracking-tight font-black break-words">{em.subject || "(no subject)"}</h1>
             <p className="text-sm font-mono text-slate-600 mt-2">to {em.recipient}</p>
             <p className="text-xs text-slate-500 mt-1">Sent {fmt(em.sent_at)}</p>
           </div>
           <div className="flex gap-2 shrink-0">
             <Dialog open={open} onOpenChange={setOpen}>
               <DialogTrigger asChild>
-                <Button data-testid="schedule-followup-btn" className="bg-[#0A0A0A] text-white hover:bg-slate-800 rounded-sm">
+                <Button data-testid="schedule-followup-btn" className="bg-black text-white hover:bg-slate-800 rounded-lg h-11 px-6">
                   <Send className="w-4 h-4 mr-2" /> Follow-up
                 </Button>
               </DialogTrigger>
-              <DialogContent>
+              <DialogContent className="max-w-md">
                 <DialogHeader>
-                  <DialogTitle>Schedule a follow-up</DialogTitle>
+                  <DialogTitle className="text-2xl font-black tracking-tight">Schedule Follow-up</DialogTitle>
                 </DialogHeader>
-                <div className="space-y-4">
-                  <div>
-                    <Label>Send after (days)</Label>
-                    <Input
-                      data-testid="followup-days"
-                      type="number" min="1"
-                      value={days} onChange={(e) => setDays(e.target.value)}
-                    />
+                <div className="space-y-6 py-4">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <Label className="text-[10px] uppercase tracking-widest font-bold text-slate-400">Delay</Label>
+                      <div className="flex items-center gap-2">
+                         <Input
+                          data-testid="followup-days"
+                          type="number" min="1"
+                          className="h-10 rounded-lg"
+                          value={days} onChange={(e) => setDays(e.target.value)}
+                        />
+                        <span className="text-sm font-medium text-slate-600">days</span>
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-[10px] uppercase tracking-widest font-bold text-slate-400">Condition</Label>
+                      <Select value={condition} onValueChange={setCondition}>
+                        <SelectTrigger className="h-10 rounded-lg">
+                          <SelectValue placeholder="Select condition" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="always">Always send</SelectItem>
+                          <SelectItem value="if_not_opened">If not opened</SelectItem>
+                          <SelectItem value="if_not_replied">If not replied</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
                   </div>
-                  <div>
-                    <Label>Message</Label>
+
+                  <div className="space-y-2">
+                    <Label className="text-[10px] uppercase tracking-widest font-bold text-slate-400">Custom Message</Label>
                     <Textarea
                       data-testid="followup-message"
                       value={msg} onChange={(e) => setMsg(e.target.value)}
-                      rows={6}
-                      placeholder={`Hi ${em.recipient.split("@")[0]}, just bumping this up…`}
+                      rows={5}
+                      className="rounded-xl resize-none focus:ring-[#10B981]"
+                      placeholder={`Hi ${em.recipient.split("@")[0]}, just checking in on this...`}
                     />
                   </div>
-                  <div>
-                    <Label>Mode</Label>
-                    <div className="flex gap-3 mt-2">
+
+                  <div className="space-y-3">
+                    <Label className="text-[10px] uppercase tracking-widest font-bold text-slate-400">Delivery Mode</Label>
+                    <div className="grid grid-cols-2 gap-3">
                       <button
                         type="button"
-                        data-testid="mode-manual"
                         onClick={() => setMode("manual")}
-                        className={`px-4 py-2 text-sm border ${mode === "manual" ? "bg-[#0A0A0A] text-white border-black" : "bg-white text-slate-700 border-slate-300"}`}
-                      >Manual reminder</button>
+                        className={`p-3 text-left rounded-xl border transition-all ${mode === "manual" ? "border-black bg-black text-white shadow-md" : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"}`}
+                      >
+                        <div className="text-xs font-bold mb-0.5">Manual</div>
+                        <div className="text-[10px] opacity-70">Reminder on dashboard</div>
+                      </button>
                       <button
                         type="button"
-                        data-testid="mode-auto"
                         onClick={() => setMode("auto")}
-                        className={`px-4 py-2 text-sm border ${mode === "auto" ? "bg-[#0A0A0A] text-white border-black" : "bg-white text-slate-700 border-slate-300"}`}
-                      >Auto-send via Gmail</button>
+                        className={`p-3 text-left rounded-xl border transition-all ${mode === "auto" ? "border-black bg-black text-white shadow-md" : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"}`}
+                      >
+                        <div className="text-xs font-bold mb-0.5">Automatic</div>
+                        <div className="text-[10px] opacity-70">Send via Gmail extension</div>
+                      </button>
                     </div>
-                    <p className="text-xs text-slate-500 mt-2 leading-relaxed">
-                      Auto-send: extension drafts &amp; sends from your Gmail when due. Manual: dashboard shows reminder.
-                    </p>
                   </div>
                 </div>
                 <DialogFooter>
-                  <Button data-testid="followup-submit" onClick={submit} className="bg-[#10B981] hover:bg-emerald-600 rounded-sm">
-                    Schedule
+                  <Button onClick={submit} className="w-full bg-[#10B981] hover:bg-emerald-600 text-white rounded-xl h-12 font-bold text-base shadow-lg shadow-emerald-200 transition-all active:scale-[0.98]">
+                    Set Follow-up Schedule
                   </Button>
                 </DialogFooter>
               </DialogContent>

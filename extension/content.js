@@ -250,6 +250,81 @@
     });
   }
 
+  // Detect if a tracked email has been replied to
+  const pendingReplied = new Set();
+  async function detectReplies() {
+    if (STATE.dead || !STATE.config?.backend_url) return;
+    
+    // 1. SCAN INBOX ROWS
+    const rows = document.querySelectorAll('tr.zA, tr[role="row"]');
+    rows.forEach((row) => {
+      const subjEl = row.querySelector(".bog") || row.querySelector(".y6 span");
+      if (!subjEl) return;
+      
+      const subjectText = subjEl.innerText || "";
+      const normalized = normalizeSubject(subjectText);
+      const match = STATE.sentMap[normalized];
+      
+      if (match && !match.replied && !pendingReplied.has(match.id)) {
+        // GMAIL INDICATORS FOR REPLY IN LIST VIEW:
+        const countEl = row.querySelector(".at, .byY, .bsU, .amH, .as");
+        const countText = countEl?.innerText || "";
+        const countMatch = countText.match(/(\d+)/);
+        const count = countMatch ? parseInt(countMatch[1]) : 1;
+
+        const labels = row.innerText || "";
+        const hasInboxLabel = labels.includes("Inbox") || !!row.querySelector('div[aria-label="Inbox"]');
+        const isSentFolder = window.location.hash.includes("sent") || window.location.href.includes("sent");
+        
+        // If it's in the inbox OR has multiple messages, it's a reply
+        if ((count > 1 || hasInboxLabel) && !isSentFolder) {
+          markReplied(match, subjectText, `Count: ${count}`);
+        }
+      }
+    });
+
+    // 2. SCAN OPEN THREAD VIEW
+    const threadHeader = document.querySelector("h2[data-thread-perm-id], .hP");
+    if (threadHeader) {
+      const subjectText = threadHeader.innerText || "";
+      const normalized = normalizeSubject(subjectText);
+      const match = STATE.sentMap[normalized];
+      
+      if (match && !match.replied && !pendingReplied.has(match.id)) {
+        // Count how many messages are in the current thread view
+        // .adn is a common message container class
+        const messages = document.querySelectorAll(".adn, .kv, .h7");
+        if (messages.length > 1) {
+          markReplied(match, subjectText, `Thread Size: ${messages.length}`);
+        }
+      }
+    }
+  }
+
+  async function markReplied(match, subject, reason) {
+    if (pendingReplied.has(match.id)) return;
+    pendingReplied.add(match.id);
+    log("Reply detected for:", subject, reason);
+    
+    try {
+      await api(`/api/track/${match.id}/mark-replied`, { method: "POST" });
+      log("Successfully marked as replied:", subject);
+      match.replied = true; 
+      
+      chrome.runtime.sendMessage({
+        type: "SHOW_INSTANT_NOTIFICATION",
+        tracked_id: match.id,
+        title: "Reply Detected! 🎯",
+        message: `Lead: ${match.recipient}\nAll sequences stopped.`
+      });
+
+      loadEmails().then(renderTicks);
+    } catch (e) {
+      console.warn("[MailTrack] mark-replied failed", e);
+      pendingReplied.delete(match.id);
+    }
+  }
+
   // Detect when the user opens their own tracked email in Gmail and ping backend
   // so the next ~90s of pixel hits are classified as self-view (scans).
   const markedViewingAt = {};
@@ -358,6 +433,7 @@
     await attachToCompose();
     await loadEmails();
     renderTicks();
+    detectReplies();
     detectSelfViewing();
     connectSSE();
   }

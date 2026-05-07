@@ -40,6 +40,11 @@ export default function FollowUps() {
                   <span className={`text-[10px] tracking-[0.2em] uppercase font-bold px-2 py-0.5 ${f.sent ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-700"}`}>
                     {f.sent ? "sent" : f.mode}
                   </span>
+                  {f.trigger_condition && f.trigger_condition !== "always" && (
+                    <span className="text-[10px] tracking-tight uppercase font-bold px-2 py-0.5 bg-amber-50 text-amber-700 border border-amber-100 rounded">
+                      {f.trigger_condition.replace(/_/g, ' ')}
+                    </span>
+                  )}
                   <Link to={`/emails/${f.tracked_email_id}`} className="text-sm font-medium hover:underline">
                     {f.subject}
                   </Link>
