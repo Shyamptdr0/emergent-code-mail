@@ -294,9 +294,10 @@ async def heartbeat_viewing(payload: HeartbeatViewing, user: dict = Depends(get_
 @api_router.post("/track/{tid}/mark-viewing")
 async def mark_viewing(tid: str, user: dict = Depends(get_user_by_ext_key)):
     """Extension calls this when user opens their own tracked email in Gmail.
-    Sets self_viewing_until = now + 90s (forward filter). No retroactive deletion to protect genuine opens."""
+    Sets self_viewing_until = now + 10s (forward filter). Reduced from 90s to allow 
+    rapid local cross-account testing without blocking genuine subsequent opens."""
     now = datetime.now(timezone.utc)
-    until = (now + timedelta(seconds=90)).isoformat()
+    until = (now + timedelta(seconds=10)).isoformat()
 
     await db.tracked_emails.update_one(
         {"id": tid, "user_id": user["user_id"]},
