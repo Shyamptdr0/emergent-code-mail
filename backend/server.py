@@ -215,6 +215,7 @@ async def create_tracked(payload: TrackCreate, request: Request, user: dict = De
         "subject": payload.subject,
         "message_preview": payload.message_preview or "",
         "sent_at": now,
+        "status": "draft",
         "sender_ip": sender_ip,
         "open_count": 0,
         "scan_count": 0,
@@ -239,6 +240,8 @@ class TrackUpdate(BaseModel):
 @api_router.post("/track/update/{tid}")
 async def update_tracked(tid: str, payload: TrackUpdate, user: dict = Depends(get_user_by_ext_key)):
     updates = {k: v for k, v in payload.model_dump().items() if v is not None}
+    updates["status"] = "sent"
+    updates["sent_at"] = datetime.now(timezone.utc).isoformat()
     if updates:
         await db.tracked_emails.update_one(
             {"id": tid, "user_id": user["user_id"]},
@@ -333,6 +336,15 @@ async def mark_viewing(tid: str, user: dict = Depends(get_user_by_ext_key)):
 async def track_pixel(tid: str, request: Request):
     em = await db.tracked_emails.find_one({"id": tid}, {"_id": 0})
     if em:
+        # Ignore completely if the email hasn't been sent yet (compose window pixel load)
+        if em.get("status") == "draft":
+            headers = {
+                "Content-Type": "image/png",
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+            }
+            return FastResponse(content=PIXEL_PNG, media_type="image/png", headers=headers)
+
         ua = request.headers.get("user-agent", "")
         ip = get_client_ip(request)
         ts = datetime.now(timezone.utc).isoformat()
@@ -359,7 +371,7 @@ async def track_pixel(tid: str, request: Request):
         is_image_proxy = ("GoogleImageProxy" in ua) or ("ggpht.com" in ua)
 
         is_scan = (
-            seconds_since_send < 2                      # 2s grace covers immediate Gmail scan
+            seconds_since_send < 15                     # 15s grace covers immediate Gmail scan and sender rendering
             or is_self_viewing                          # explicit thread-view ping from extension
             # or (sender_ip and ip and sender_ip == ip) # Disabled so user can test between accounts on same device
             or (is_google_scanner_ip and not is_image_proxy)
