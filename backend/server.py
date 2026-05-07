@@ -294,43 +294,17 @@ async def heartbeat_viewing(payload: HeartbeatViewing, user: dict = Depends(get_
 @api_router.post("/track/{tid}/mark-viewing")
 async def mark_viewing(tid: str, user: dict = Depends(get_user_by_ext_key)):
     """Extension calls this when user opens their own tracked email in Gmail.
-    1) Sets self_viewing_until = now + 90s (forward filter)
-    2) Retroactively reclassifies opens from the last 60s as scans (covers race
-       condition where Gmail loaded pixel before extension could ping)."""
+    Sets self_viewing_until = now + 90s (forward filter). No retroactive deletion to protect genuine opens."""
     now = datetime.now(timezone.utc)
     until = (now + timedelta(seconds=90)).isoformat()
-    cutoff = (now - timedelta(seconds=60)).isoformat()
 
-    em = await db.tracked_emails.find_one(
-        {"id": tid, "user_id": user["user_id"]}, {"_id": 0}
-    )
-    if not em:
-        return {"ok": False, "error": "not_found"}
-
-    opens = em.get("opens", [])
-    scans = em.get("scans", [])
-    keep_opens = []
-    moved = 0
-    for o in opens:
-        if o.get("ts", "") >= cutoff:
-            scans.append({**o, "self_view_retro": True})
-            moved += 1
-        else:
-            keep_opens.append(o)
-
-    last_opened = keep_opens[-1]["ts"] if keep_opens else None
     await db.tracked_emails.update_one(
         {"id": tid, "user_id": user["user_id"]},
         {"$set": {
             "self_viewing_until": until,
-            "opens": keep_opens,
-            "open_count": len(keep_opens),
-            "last_opened_at": last_opened,
-            "scans": scans,
-            "scan_count": len(scans),
         }},
     )
-    return {"ok": True, "self_viewing_until": until, "moved_to_scans": moved}
+    return {"ok": True, "self_viewing_until": until}
 
 @api_router.get("/track/pixel/{tid}.png")
 async def track_pixel(tid: str, request: Request):
@@ -344,6 +318,16 @@ async def track_pixel(tid: str, request: Request):
                 "Pragma": "no-cache",
             }
             return FastResponse(content=PIXEL_PNG, media_type="image/png", headers=headers)
+
+        # Delay processing by 2 seconds. This perfectly solves the race condition
+        # allowing the sender's extension to fire the /mark-viewing signal 
+        # BEFORE we evaluate whether this hit is a self-view or not.
+        await asyncio.sleep(2.0)
+
+        # Re-fetch the email to get the updated self_viewing_until flag!
+        em = await db.tracked_emails.find_one({"id": tid}, {"_id": 0})
+        if not em:
+            return FastResponse(content=PIXEL_PNG, media_type="image/png")
 
         ua = request.headers.get("user-agent", "")
         ip = get_client_ip(request)
