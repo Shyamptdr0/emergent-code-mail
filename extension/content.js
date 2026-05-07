@@ -95,6 +95,13 @@
   async function attachToCompose() {
     const composes = document.querySelectorAll('div[role="dialog"]');
     for (const dlg of composes) {
+      // If the dialog is hidden (closed/sent), clean up our state so it doesn't leak into the next email
+      if (dlg.offsetParent === null) {
+        STATE.composeMap.delete(dlg);
+        delete dlg.dataset.mtAttached;
+        continue;
+      }
+
       if (dlg.dataset.mtAttached) continue;
       const sendBtn = findSendButton(dlg);
       if (!sendBtn || !findBody(dlg)) continue;
@@ -126,6 +133,10 @@
           body: JSON.stringify({ recipient, subject, message_preview: preview }),
         }).then(() => log("tracking updated on send", info.tid, recipient, subject))
           .catch((e) => console.warn("[MailTrack] update failed", e));
+          
+        // CRITICAL FIX: Clear state immediately on send so reused dialogs get a fresh ID
+        STATE.composeMap.delete(dlg);
+        delete dlg.dataset.mtAttached;
       };
       sendBtn.addEventListener("click", updateOnSend, true);
       dlg.addEventListener("keydown", (ev) => {
