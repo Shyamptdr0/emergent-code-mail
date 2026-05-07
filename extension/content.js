@@ -290,20 +290,34 @@
 
   // --- Extension-Assisted Tracking (Bypasses Google Image Proxy) ---
   const markedOpenedAt = {};
+  let currentlyViewingThread = false;
+
   function detectEmailOpened() {
     try {
       // If we are in the Sent folder, we don't want to trigger this (it would be a self-view)
       const isSentContext = window.location.hash.includes("sent") || 
                            window.location.hash.includes("label/sent") ||
                            document.querySelector('.nZ');
-      if (isSentContext) return;
+      if (isSentContext) {
+        currentlyViewingThread = false;
+        return;
+      }
 
       // Are we looking at an opened email thread?
       const h2 = document.querySelector("h2[data-thread-perm-id], .hP");
-      if (!h2) return;
+      if (!h2) {
+        // User left the email view (e.g. back to Inbox)
+        currentlyViewingThread = false;
+        // Clear local debounce so immediate re-entry counts as a new open
+        for (const key in markedOpenedAt) delete markedOpenedAt[key];
+        return;
+      }
+
+      if (currentlyViewingThread) return; // We already counted this specific entrance into the thread
 
       // Look for any tracking pixels in the currently opened email body
       const trackers = document.querySelectorAll('img[src*="api/track/pixel"], img[src*="api%2Ftrack%2Fpixel"], img[data-mt-pixel], .mt-wrapper img');
+      let foundTid = null;
       trackers.forEach(img => {
         let tid = img.getAttribute("data-mt-pixel");
         if (!tid) {
@@ -312,21 +326,24 @@
           const match = src.match(/\/api\/track\/pixel\/([^.]+)\.png/);
           if (match) tid = match[1];
         }
-        
-        if (tid) {
-          const now = Date.now();
-          // Debounce 10 seconds locally to avoid spamming the backend
-          if (markedOpenedAt[tid] && now - markedOpenedAt[tid] < 10000) return;
-          markedOpenedAt[tid] = now;
-          
-          api(`/api/track/${tid}/extension-open`, { method: "POST" })
-            .catch(e => console.warn("[MailTrack] extension-open failed", e));
-        }
+        if (tid) foundTid = tid;
       });
+        
+      if (foundTid) {
+        currentlyViewingThread = true;
+        const now = Date.now();
+        // 1-second local debounce just to prevent double-firing in rapid DOM mutations
+        if (markedOpenedAt[foundTid] && now - markedOpenedAt[foundTid] < 1000) return;
+        markedOpenedAt[foundTid] = now;
+        
+        api(`/api/track/${foundTid}/extension-open`, { method: "POST" })
+          .catch(e => console.warn("[MailTrack] extension-open failed", e));
+      }
     } catch (e) {}
   }
 
-  setInterval(detectEmailOpened, 2000);
+  // Run this very frequently so rapid tab-switching is caught
+  setInterval(detectEmailOpened, 500);
 
 
 

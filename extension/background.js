@@ -30,7 +30,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const key = msg.tracked_id;
     if (recentNotifications.has(key)) return;
     recentNotifications.add(key);
-    setTimeout(() => recentNotifications.delete(key), 2000);
+    setTimeout(() => recentNotifications.delete(key), 1000);
 
     chrome.notifications.create("mt-inst-" + key + "-" + Date.now(), {
       type: "basic",

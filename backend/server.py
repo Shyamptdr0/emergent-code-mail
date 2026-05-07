@@ -331,13 +331,13 @@ async def extension_assisted_open(tid: str, request: Request, user: dict = Depen
         return {"ok": False}
         
     now = datetime.now(timezone.utc)
-    # Debounce 5 seconds to prevent double-counting with the initial GIP proxy hit
+    # Debounce 1 second to prevent double-counting with the initial GIP proxy hit
     last_opened = em.get("last_opened_at")
     if last_opened:
         last_dt = datetime.fromisoformat(last_opened) if isinstance(last_opened, str) else last_opened
         if last_dt.tzinfo is None:
             last_dt = last_dt.replace(tzinfo=timezone.utc)
-        if (now - last_dt).total_seconds() < 5:
+        if (now - last_dt).total_seconds() < 1:
             return {"ok": "debounced"}
             
     ts = now.isoformat()
