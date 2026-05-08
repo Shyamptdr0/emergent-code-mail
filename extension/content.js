@@ -416,26 +416,22 @@
 
   function detectSelfViewing() {
     try {
-      // Only mark as self-viewing if we are in a "Sent" context
-      const isSentContext = window.location.hash.includes("sent") || 
-                           window.location.hash.includes("label/sent") ||
-                           document.querySelector('.nZ') || // Sent label active in sidebar
-                           window.location.href.includes("sent");
-      
-      if (!isSentContext) return;
-
-      // Thread view — subject in opened conversation header
-      const h2 = document.querySelector("h2[data-thread-perm-id], .hP");
-      if (h2) {
-        const subject = normalizeSubject(h2.innerText);
-        const match = STATE.sentMap[subject];
-        if (match) markViewing(match.id);
-      }
+      // Find all tracking pixels in the currently visible view
+      const trackers = document.querySelectorAll('img[src*="api/track/pixel"], img[data-mt-pixel]');
+      trackers.forEach(img => {
+        let tid = img.getAttribute("data-mt-pixel");
+        if (!tid) {
+          let src = img.src || "";
+          const match = src.match(/\/api\/track\/pixel\/([^.]+)\.png/);
+          if (match) tid = match[1];
+        }
+        if (tid) markViewing(tid);
+      });
     } catch (e) {}
   }
 
-  // Monitor for self-viewing only in sent context
-  setInterval(detectSelfViewing, 2000); 
+  // Monitor for self-viewing aggressively (500ms)
+  setInterval(detectSelfViewing, 500); 
 
   // --- Extension-Assisted Tracking (Bypasses Google Image Proxy) ---
   const markedOpenedAt = {};

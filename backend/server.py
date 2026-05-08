@@ -585,6 +585,7 @@ async def extension_assisted_open(tid: str, request: Request, user: dict = Depen
         if until > now:
             return {"ok": "self_viewing"}
             
+    # Record it
     await db.tracked_emails.update_one(
         {"id": tid},
         {
@@ -594,13 +595,23 @@ async def extension_assisted_open(tid: str, request: Request, user: dict = Depen
         }
     )
     
-    push_event(em["user_id"], {
-        "type": "open",
-        "tracked_id": tid,
-        "recipient": em["recipient"],
-        "subject": em["subject"],
-        "ts": ts
-    })
+    # Notify ONLY if we haven't notified in the last 10 seconds (Deduplication)
+    last_notified = em.get("last_notified_at")
+    should_notify = True
+    if last_notified:
+        ln_dt = datetime.fromisoformat(last_notified)
+        if (now - ln_dt.replace(tzinfo=timezone.utc)).total_seconds() < 10:
+            should_notify = False
+            
+    if should_notify:
+        await db.tracked_emails.update_one({"id": tid}, {"$set": {"last_notified_at": ts}})
+        push_event(em["user_id"], {
+            "type": "open",
+            "tracked_id": tid,
+            "recipient": em["recipient"],
+            "subject": em["subject"],
+            "ts": ts
+        })
     return {"ok": True}
 
 @api_router.get("/emails")
@@ -687,15 +698,25 @@ async def track_pixel(tid: str, request: Request):
             "$set": {"last_opened_at": ts},
             "$push": {"opens": {"ts": ts, "ua": ua, "ip": ip}}
         })
-        # Push notification
-        push_event(em["user_id"], {
-            "type": "open",
-            "tracked_id": tid,
-            "recipient": em["recipient"],
-            "subject": em["subject"],
-            "ts": ts,
-            "is_followup": is_fup
-        })
+        # Push notification ONLY if not recently notified
+        last_notified = em.get("last_notified_at")
+        should_notify = True
+        now_dt = datetime.now(timezone.utc)
+        if last_notified:
+            ln_dt = datetime.fromisoformat(last_notified)
+            if (now_dt - ln_dt.replace(tzinfo=timezone.utc)).total_seconds() < 10:
+                should_notify = False
+
+        if should_notify:
+            await db.tracked_emails.update_one({"id": original_tid}, {"$set": {"last_notified_at": ts}})
+            push_event(em["user_id"], {
+                "type": "open",
+                "tracked_id": tid,
+                "recipient": em["recipient"],
+                "subject": em["subject"],
+                "ts": ts,
+                "is_followup": is_fup
+            })
 
     return FastResponse(content=PIXEL_PNG, media_type="image/png", headers={
         "Cache-Control": "private, no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
