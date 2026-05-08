@@ -830,7 +830,7 @@ async def _create_fup(eid, message, days, mode, condition, user_id, custom_sched
         if sent_at.tzinfo is None:
             sent_at = sent_at.replace(tzinfo=timezone.utc)
         scheduled = sent_at + timedelta(days=days)
-    
+
     doc = {
         "id": fid,
         "user_id": user_id,
@@ -848,6 +848,53 @@ async def _create_fup(eid, message, days, mode, condition, user_id, custom_sched
     await db.follow_ups.insert_one(doc)
     doc.pop("_id", None)
     return doc
+
+async def find_thread_info(access_token, recipient, subject):
+    """Searches Gmail for a thread by recipient and subject to enable correct threading."""
+    async with httpx.AsyncClient() as client:
+        query = f'to:{recipient} subject:"{subject}"'
+        url = f"https://gmail.googleapis.com/gmail/v1/users/me/messages?q={query}&maxResults=1"
+        headers = {"Authorization": f"Bearer {access_token}"}
+        r = await client.get(url, headers=headers)
+        if r.status_code == 200:
+            msgs = r.json().get("messages", [])
+            if msgs:
+                msg_id = msgs[0]["id"]
+                # Get full message to find threadId and Message-ID
+                r2 = await client.get(f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg_id}", headers=headers)
+                if r2.status_code == 200:
+                    data = r2.json()
+                    thread_id = data.get("threadId")
+                    headers_list = data.get("payload", {}).get("headers", [])
+                    msg_id_header = next((h["value"] for h in headers_list if h["name"].lower() == "message-id"), None)
+                    return thread_id, msg_id_header
+    return None, None
+
+async def send_gmail_message(access_token, recipient, subject, body_html, thread_id=None, parent_msg_id=None):
+    """Sends an email via Gmail API with support for threading (replies)."""
+    from email.mime.text import MIMEText
+    import base64
+
+    message = MIMEText(body_html, "html")
+    message["to"] = recipient
+    message["subject"] = subject
+    if thread_id and parent_msg_id:
+        message["In-Reply-To"] = parent_msg_id
+        message["References"] = parent_msg_id
+
+    raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+    payload = {"raw": raw}
+    if thread_id:
+        payload["threadId"] = thread_id
+
+    async with httpx.AsyncClient() as client:
+        url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json"
+        }
+        r = await client.post(url, headers=headers, json=payload)
+        return r.status_code == 200
 
 # ---------- Automation Rules ----------
 @api_router.post("/automation-rules")
@@ -1260,23 +1307,16 @@ async def check_all_replies():
                 
                 tid = em.get("gmail_thread_id")
                 
-                async with httpx.AsyncClient() as client:
-                    # 1. DISCOVERY: If we don't have a thread ID, search for it
-                    if not tid:
-                        query = f'to:{em["recipient"]} subject:"{em["subject"]}"'
-                        search_url = f"https://gmail.googleapis.com/gmail/v1/users/me/messages?q={query}&maxResults=1"
-                        r = await client.get(search_url, headers={"Authorization": f"Bearer {user['access_token']}"})
-                        if r.status_code == 200:
-                            msgs = r.json().get("messages", [])
-                            if msgs:
-                                msg_info = await client.get(f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msgs[0]['id']}", headers={"Authorization": f"Bearer {user['access_token']}"})
-                                if msg_info.status_code == 200:
-                                    tid = msg_info.json().get("threadId")
-                                    await db.tracked_emails.update_one({"id": em["id"]}, {"$set": {"gmail_thread_id": tid}})
-                                    logging.info(f"Auto-discovered Thread ID for {em['id']}: {tid}")
-
-                    # 2. SCAN: If we have a thread ID (discovered or existing), check for replies
+                # 1. DISCOVERY: If we don't have a thread ID, try to find it
+                if not tid:
+                    tid, _ = await find_thread_info(user["access_token"], em["recipient"], em["subject"])
                     if tid:
+                        await db.tracked_emails.update_one({"id": em["id"]}, {"$set": {"gmail_thread_id": tid}})
+                        logging.info(f"Auto-Discovery: Linked thread {tid} for email {em['id']}")
+
+                # 2. SCAN: If we have a thread ID, check for replies
+                if tid:
+                    async with httpx.AsyncClient() as client:
                         thread_url = f"https://gmail.googleapis.com/gmail/v1/users/me/threads/{tid}"
                         r = await client.get(thread_url, headers={"Authorization": f"Bearer {user['access_token']}"})
                         if r.status_code == 200:
@@ -1293,7 +1333,7 @@ async def check_all_replies():
                             if found_reply:
                                 await db.tracked_emails.update_one({"id": em["id"]}, {"$set": {"replied": True}})
                                 await db.follow_ups.delete_many({"tracked_email_id": em["id"], "sent": False})
-                                logging.info(f"Background Sync: Lead {em['recipient']} reply detected. Moved to Active.")
+                                logging.info(f"Background Alert: Lead {em['recipient']} reply detected! Promoted to Active.")
                                 
                                 push_event(user["user_id"], {
                                     "type": "reply",
@@ -1303,8 +1343,8 @@ async def check_all_replies():
                                     "ts": datetime.now(timezone.utc).isoformat()
                                 })
             
-            # Wait 2 minutes before next scan
-            await asyncio.sleep(120) 
+            # Run frequently (every 60s) for responsive updates
+            await asyncio.sleep(60) 
         except Exception as e:
             logging.error(f"Reply checker error: {e}")
             await asyncio.sleep(60)
