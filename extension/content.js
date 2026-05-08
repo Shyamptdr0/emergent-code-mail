@@ -669,6 +669,10 @@
             log("[SSE] Instant open detected:", data);
             showToast(`${data.recipient} opened your email: ${data.subject}`);
             renderTicks();
+          } else if (data.type === "reply") {
+            log("[SSE] Instant reply detected:", data);
+            showToast(`🎯 NEW REPLY from ${data.recipient}! Moving to Active.`);
+            renderTicks();
           }
         } catch (err) {}
       };

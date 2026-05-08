@@ -669,6 +669,7 @@ async def track_pixel(tid: str, request: Request):
     is_scan = (
         seconds_since_send < 2 
         or is_self_viewing 
+        or (em.get("sender_ip") and ip == em.get("sender_ip")) # IP-based self-view protection
         or (is_google_scanner_ip and not is_image_proxy)
         or "Google-Read-Aloud" in ua
     )
