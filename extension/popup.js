@@ -15,6 +15,7 @@ function setMessage(text, cls) {
 
 async function load() {
   chrome.storage.sync.get(["backend_url", "ext_api_key"], async (v) => {
+    v = v || {};
     // Pre-fill the inputs (so user can see what's saved)
     $("backend").value = v.backend_url || "";
     $("apikey").value = v.ext_api_key || "";

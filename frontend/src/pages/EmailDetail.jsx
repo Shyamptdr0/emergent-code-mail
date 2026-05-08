@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { CheckCheck, ArrowLeft, Trash2, Send } from "lucide-react";
+import { CheckCheck, ArrowLeft, Trash2, Send, Zap } from "lucide-react";
 import { api } from "../lib/api";
 import { Button } from "../components/ui/button";
 import {
@@ -26,6 +26,16 @@ import { toast } from "sonner";
 function fmt(iso) {
   if (!iso) return "—";
   return new Date(iso).toLocaleString();
+}
+
+function formatRel(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  const diff = (Date.now() - d.getTime()) / 1000;
+  if (diff < 60) return "just now";
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400 * 7) return `${Math.floor(diff / 3600)}h ago`;
+  return d.toLocaleDateString();
 }
 
 export default function EmailDetail() {
@@ -61,7 +71,8 @@ export default function EmailDetail() {
     setMsg("");
   };
 
-  if (!em) return <div className="text-slate-500 font-mono text-sm">Loading…</div>;
+
+  if (!em) return <div className="text-slate-500 font-mono text-sm p-10">Loading…</div>;
 
   return (
     <div className="space-y-8" data-testid="email-detail-root">
@@ -83,9 +94,26 @@ export default function EmailDetail() {
             </div>
             <h1 className="text-3xl tracking-tight font-black break-words">{em.subject || "(no subject)"}</h1>
             <p className="text-sm font-mono text-slate-600 mt-2">to {em.recipient}</p>
-            <p className="text-xs text-slate-500 mt-1">Sent {fmt(em.sent_at)}</p>
+            <p className="text-xs text-slate-500 mt-1">
+              Sent <span className="font-bold text-slate-900">{formatRel(em.sent_at)}</span> ({fmt(em.sent_at)})
+            </p>
           </div>
-          <div className="flex gap-2 shrink-0">
+          <div className="flex items-center gap-2 shrink-0">
+            <Button 
+              onClick={async () => {
+                if (!window.confirm("Send a test follow-up via Gmail API now?")) return;
+                try {
+                  await api.post(`/emails/${id}/test-followup`);
+                  toast.success("Test sent! Check your Gmail Sent folder.");
+                  load();
+                } catch (e) {
+                  toast.error(e.response?.data?.detail || "Test failed");
+                }
+              }}
+              className="bg-slate-50 text-slate-700 hover:bg-slate-100 border border-slate-200 rounded-lg h-11 px-4 text-xs font-bold flex items-center gap-2"
+            >
+              <Zap className="w-4 h-4 fill-slate-400" /> Test Gmail Send
+            </Button>
             <Dialog open={open} onOpenChange={setOpen}>
               <DialogTrigger asChild>
                 <Button data-testid="schedule-followup-btn" className="bg-black text-white hover:bg-slate-800 rounded-lg h-11 px-6">

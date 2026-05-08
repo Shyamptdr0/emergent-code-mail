@@ -15,6 +15,20 @@ from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
 import httpx
+
+def get_next_business_time(dt: datetime, days_offset: int, target_hour: int = 10):
+    """Calculates the next scheduled time, skipping weekends and moving to Monday 10AM."""
+    target = dt + timedelta(days=days_offset)
+    # If the target falls on a weekend, or if it's sent on Friday and 24h later is Saturday
+    # The user says: "Friday ko kiya to saturday/sunday ko nhi jayega direct monday 10 baje"
+    
+    # 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri, 5=Sat, 6=Sun
+    if target.weekday() >= 5: # Saturday or Sunday
+        days_to_monday = (7 - target.weekday()) % 7
+        target = target + timedelta(days=days_to_monday)
+        target = target.replace(hour=target_hour, minute=0, second=0, microsecond=0)
+    
+    return target
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
 
@@ -26,7 +40,24 @@ client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
 app = FastAPI()
+
+async def get_user_by_ext_key(request: Request) -> dict:
+    x_ext_key = request.headers.get("X-Ext-Key") or request.query_params.get("key")
+    if not x_ext_key:
+        raise HTTPException(status_code=401, detail="Missing extension key")
+    user = await db.users.find_one({"ext_api_key": x_ext_key}, {"_id": 0})
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid extension key")
+    return user
+
 api_router = APIRouter(prefix="/api")
+
+@api_router.get("/ext-profile")
+async def ext_profile(user: dict = Depends(get_user_by_ext_key)):
+    return {
+        "email": user["email"],
+        "name": user["name"]
+    }
 
 # 1x1 transparent PNG bytes
 PIXEL_PNG = base64.b64decode(
@@ -90,6 +121,8 @@ class FollowUp(BaseModel):
     sent: bool = False
     sent_at: Optional[str] = None
     trigger_condition: str = "always"
+    open_count: int = 0
+    opens: List[Dict[str, Any]] = []
 
 class AutomationStage(BaseModel):
     trigger: str
@@ -130,15 +163,6 @@ async def get_current_user(request: Request, authorization: Optional[str] = Head
         raise HTTPException(status_code=401, detail="User not found")
     return user
 
-async def get_user_by_ext_key(request: Request) -> dict:
-    x_ext_key = request.headers.get("X-Ext-Key") or request.query_params.get("key")
-    if not x_ext_key:
-        raise HTTPException(status_code=401, detail="Missing extension key")
-    user = await db.users.find_one({"ext_api_key": x_ext_key}, {"_id": 0})
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid extension key")
-    return user
-
 # ---------- Auth endpoints ----------
 class GoogleAuth(BaseModel):
     token: str
@@ -170,10 +194,11 @@ class GoogleNativeAuth(BaseModel):
     picture: Optional[str] = None
 
 @api_router.post("/auth/google-native")
-async def auth_google_native(payload: GoogleNativeAuth, response: Response):
-    email = payload.email
-    name = payload.name or email
-    picture = payload.picture
+async def auth_google_native(payload: dict, response: Response):
+    email = payload.get("email")
+    name = payload.get("name") or email
+    picture = payload.get("picture")
+    access_token = payload.get("access_token")
 
     existing = await db.users.find_one({"email": email}, {"_id": 0})
     if existing:
@@ -181,7 +206,12 @@ async def auth_google_native(payload: GoogleNativeAuth, response: Response):
         ext_api_key = existing.get("ext_api_key") or secrets.token_urlsafe(24)
         await db.users.update_one(
             {"user_id": user_id},
-            {"$set": {"name": name, "picture": picture, "ext_api_key": ext_api_key}},
+            {"$set": {
+                "name": name, 
+                "picture": picture, 
+                "ext_api_key": ext_api_key,
+                "access_token": access_token
+            }},
         )
     else:
         user_id = f"user_{uuid.uuid4().hex[:12]}"
@@ -192,6 +222,7 @@ async def auth_google_native(payload: GoogleNativeAuth, response: Response):
             "name": name,
             "picture": picture,
             "ext_api_key": ext_api_key,
+            "access_token": access_token,
             "created_at": datetime.now(timezone.utc).isoformat(),
         })
 
@@ -294,27 +325,30 @@ async def update_tracked(tid: str, payload: TrackUpdate, user: dict = Depends(ge
         )
         
         # Apply Automation Sequences
+        # Avoid duplicate scheduling if follow-ups already exist for this TID
+        existing_scheduled = await db.follow_ups.count_documents({"tracked_email_id": tid, "sent": False})
+        if existing_scheduled > 0:
+            return {"ok": True}
+
         rules = await db.automation_rules.find({"user_id": user["user_id"]}).to_list(100)
         sent_at = datetime.now(timezone.utc)
         
+        # Check if any follow-ups were already sent (e.g. manual or test)
+        # to skip those stages in the sequence
+        sent_count = await db.follow_ups.count_documents({"tracked_email_id": tid, "sent": True})
+
         for rule in rules:
-            cumulative_days = 0
             for idx, stage in enumerate(rule["stages"]):
-                cumulative_days += stage["days"]
+                if idx < sent_count:
+                    continue # Skip stages that have already been fulfilled
                 
-                # Calculate scheduled time: cumulative days + target time
-                target_time = stage["time"].split(":")
-                hour = int(target_time[0])
-                minute = int(target_time[1])
-                
-                scheduled = (sent_at + timedelta(days=cumulative_days)).replace(
-                    hour=hour, minute=minute, second=0, microsecond=0
-                )
+                # Calculate scheduled time using the weekend-aware logic
+                scheduled = get_next_business_time(sent_at, stage["days"], target_hour=int(stage["time"].split(":")[0]))
                 
                 await _create_fup(
                     tid, 
                     stage["message"], 
-                    cumulative_days, 
+                    stage["days"], 
                     "auto", 
                     f"if_{stage['trigger']}", 
                     user["user_id"],
@@ -328,7 +362,43 @@ class HeartbeatViewing(BaseModel):
 
 @api_router.post("/track/{tid}/mark-replied")
 async def mark_replied(tid: str, user: dict = Depends(get_user_by_ext_key)):
-    """Extension or Dashboard calls this to mark replied and stop sequences."""
+    """Extension or Dashboard calls this to mark replied and stop sequences.
+    Verified against Gmail API to avoid false positives."""
+    
+    # 1. Server-side verification using Gmail API
+    if user.get("access_token"):
+        em = await db.tracked_emails.find_one({"id": tid, "user_id": user["user_id"]})
+        if em:
+            # Find the thread
+            tgid, _ = await find_thread_info(user["access_token"], em["recipient"], em["subject"])
+            if not tgid:
+                logging.info(f"Reply detection deferred for {tid} (Thread not indexed yet)")
+                return {"ok": True, "verified": False, "status": "indexing"}
+
+            url = f"https://gmail.googleapis.com/gmail/v1/users/me/threads/{tgid}"
+            async with httpx.AsyncClient() as client:
+                r = await client.get(url, headers={"Authorization": f"Bearer {user['access_token']}"})
+                if r.status_code == 200:
+                    thread_data = r.json()
+                    messages = thread_data.get("messages", [])
+                    
+                    found_real_reply = False
+                    my_email = user["email"].lower()
+                    for m in messages:
+                        headers = m.get("payload", {}).get("headers", [])
+                        from_h = next((h["value"].lower() for h in headers if h["name"].lower() == "from"), "")
+                        if from_h and my_email not in from_h:
+                            found_real_reply = True
+                            break
+                    
+                    if not found_real_reply:
+                        logging.info(f"Rejected false reply detection for {tid} (Verified: only sender spoke)")
+                        return {"ok": True, "verified": False, "status": "ignored"}
+                else:
+                    # Token might be expired or API down
+                    return {"ok": True, "verified": False, "status": "api_error"}
+
+    # 2. Proceed to mark as replied (if verified or if we don't have Gmail access to verify)
     await db.tracked_emails.update_one(
         {"id": tid, "user_id": user["user_id"]},
         {"$set": {"replied": True}}
@@ -339,7 +409,7 @@ async def mark_replied(tid: str, user: dict = Depends(get_user_by_ext_key)):
         "user_id": user["user_id"],
         "sent": False
     })
-    return {"ok": True}
+    return {"ok": True, "verified": True}
 
 @api_router.get("/emails/active")
 async def list_active_mails(user: dict = Depends(get_current_user)):
@@ -513,21 +583,17 @@ async def track_pixel(tid: str, request: Request):
         is_image_proxy = ("GoogleImageProxy" in ua) or ("ggpht.com" in ua)
 
         is_scan = (
-            seconds_since_send < 5                      # 5s grace covers immediate Gmail scan and sender rendering
+            seconds_since_send < 2                      # 2s grace covers immediate Gmail scan
             or is_self_viewing                          # explicit thread-view ping from extension
-            # or (sender_ip and ip and sender_ip == ip) # Disabled so user can test between accounts on same device
             or (is_google_scanner_ip and not is_image_proxy)
             or "Google-Read-Aloud" in ua
-            or "GoogleSafetyCenter" in ua
-            or "Slackbot-LinkExpanding" in ua
-            or "bingbot" in ua.lower()
-            or "facebookexternalhit" in ua.lower()
         )
 
         print(f"[DEBUG] tid={tid} ip={ip} is_scan={is_scan} ua={ua[:50]} proxy={is_image_proxy}")
 
+        # Record it
         if is_scan:
-            await db.tracked_emails.update_one(
+            await collection.update_one(
                 {"id": tid},
                 {
                     "$inc": {"scan_count": 1},
@@ -535,7 +601,7 @@ async def track_pixel(tid: str, request: Request):
                 },
             )
         else:
-            await db.tracked_emails.update_one(
+            await collection.update_one(
                 {"id": tid},
                 {
                     "$inc": {"open_count": 1},
@@ -543,12 +609,14 @@ async def track_pixel(tid: str, request: Request):
                     "$push": {"opens": {"ts": ts, "ua": ua, "ip": ip}},
                 },
             )
+            # Notify EVERY open instantly
             push_event(em["user_id"], {
                 "type": "open",
                 "tracked_id": tid,
                 "recipient": em["recipient"],
                 "subject": em["subject"],
                 "ts": ts,
+                "is_followup": is_fup
             })
 
     headers = {
@@ -724,21 +792,70 @@ async def delete_rule(rid: str, user: dict = Depends(get_current_user)):
 
 @api_router.get("/follow-ups")
 async def list_follow_ups(user: dict = Depends(get_current_user)):
+    """List all follow-ups with their parent email's current status."""
     rows = await db.follow_ups.find(
         {"user_id": user["user_id"]}, {"_id": 0}
     ).sort("scheduled_at", 1).to_list(500)
-    return rows
+    
+    # Enrich with email status
+    results = []
+    for f in rows:
+        em = await db.tracked_emails.find_one({"id": f["tracked_email_id"]}, {"_id": 0})
+        if em:
+            f["email_opened"] = em.get("open_count", 0) > 0
+            f["email_replied"] = em.get("replied", False)
+        results.append(f)
+        
+    return results
 
 @api_router.get("/follow-ups/due")
 async def due_follow_ups(user: dict = Depends(get_user_by_ext_key)):
-    """Extension polls for due follow-ups whose tracked email has NOT been replied/opened-replied."""
+    """Extension polls for due follow-ups whose tracked email meets the trigger conditions."""
     now_iso = datetime.now(timezone.utc).isoformat()
-    rows = await db.follow_ups.find({
+    
+    # 1. Get all unsent follow-ups that are scheduled for now or in the past
+    potential_dues = await db.follow_ups.find({
         "user_id": user["user_id"],
         "sent": False,
         "scheduled_at": {"$lte": now_iso},
-    }, {"_id": 0}).to_list(50)
-    return rows
+    }, {"_id": 0}).to_list(100)
+    
+    if not potential_dues:
+        return []
+        
+    # 2. Filter them based on the actual status of the parent tracked email
+    results = []
+    for f in potential_dues:
+        em = await db.tracked_emails.find_one({"id": f["tracked_email_id"]}, {"_id": 0})
+        if not em:
+            continue
+            
+        condition = f.get("trigger_condition", "always")
+        is_opened = em.get("open_count", 0) > 0
+        is_replied = em.get("replied", False)
+        
+        should_send = False
+        if condition == "always":
+            should_send = True
+        elif condition == "if_not_opened":
+            should_send = not is_opened
+        elif condition == "if_not_replied":
+            should_send = not is_replied
+        elif condition == "if_opened_no_reply":
+            should_send = is_opened and not is_replied
+            
+        # Optimization: If the mail is already replied to, we should probably cancel 
+        # all future follow-ups anyway, but mark-replied endpoint already does that.
+        # This is an extra safety check.
+        if is_replied:
+            should_send = False
+            
+        if should_send:
+            # Include email status for the extension/dashboard to show
+            f["email_status"] = {"opened": is_opened, "replied": is_replied}
+            results.append(f)
+            
+    return results
 
 @api_router.post("/follow-ups/{fid}/mark-sent")
 async def mark_sent(fid: str, user: dict = Depends(get_current_user)):
@@ -773,20 +890,346 @@ async def mark_sent_ext(fid: str, user: dict = Depends(get_user_by_ext_key)):
         )
     return {"ok": True}
 
+@api_router.post("/emails/{tid}/sequence")
+async def start_sequence(tid: str, user: dict = Depends(get_current_user)):
+    """Schedules a sequence of 3 follow-ups on Day 1, Day 3, and Day 5 (business days only)."""
+    em = await db.tracked_emails.find_one({"id": tid, "user_id": user["user_id"]})
+    if not em:
+        raise HTTPException(404, "Email not found")
+        
+    # Check if already has follow-ups to avoid duplicates
+    existing = await db.follow_ups.count_documents({"tracked_email_id": tid, "sent": False})
+    if existing > 0:
+        raise HTTPException(400, "Sequence or follow-up already active for this email")
+
+    # Sequence configuration
+    # 1st FUP: 24h later (Day 1)
+    # 2nd FUP: Day 3
+    # 3rd FUP: Day 5
+    steps = [
+        {"days": 1, "msg": "Hi, just checking if you saw my previous email?"},
+        {"days": 3, "msg": "Wanted to follow up on this and see if you had any questions?"},
+        {"days": 5, "msg": "Final check-in regarding this thread. Let me know if you're interested."}
+    ]
+    
+    sent_at = datetime.fromisoformat(em["sent_at"].replace("Z", "+00:00"))
+    
+    created_count = 0
+    for step in steps:
+        scheduled_at = get_next_business_time(sent_at, step["days"])
+        fup_id = secrets.token_hex(8)
+        
+        fup = {
+            "id": fup_id,
+            "user_id": user["user_id"],
+            "tracked_email_id": tid,
+            "recipient": em["recipient"],
+            "subject": f"Re: {em['subject']}",
+            "message": step["msg"],
+            "days_delay": step["days"],
+            "scheduled_at": scheduled_at.isoformat(),
+            "mode": "auto",
+            "sent": False,
+            "trigger_condition": "if_not_replied"
+        }
+        await db.follow_ups.insert_one(fup)
+        created_count += 1
+        
+    return {"ok": True, "count": created_count}
+
 @api_router.delete("/follow-ups/{fid}")
 async def delete_follow_up(fid: str, user: dict = Depends(get_current_user)):
     await db.follow_ups.delete_one({"id": fid, "user_id": user["user_id"]})
     return {"ok": True}
 
+@api_router.post("/emails/{tid}/test-followup")
+async def test_followup(tid: str, user: dict = Depends(get_current_user)):
+    """TEST ENDPOINT: Immediately sends a follow-up via Gmail API for testing."""
+    em = await db.tracked_emails.find_one({"id": tid, "user_id": user["user_id"]})
+    if not em:
+        raise HTTPException(404, "Email not found")
+        
+    rule = await db.automation_rules.find_one({"user_id": user["user_id"]})
+    if not rule or not rule.get("stages"):
+        raise HTTPException(400, "No automation rules found. Please create one on the Automation page first.")
+        
+    stage = rule["stages"][0]
+    msg_text = stage["message"]
+    
+    if not user.get("access_token"):
+        raise HTTPException(400, "Gmail access not found. Please log out and log in again to grant permission.")
+
+    # Generate pixel for tracking the test follow-up too
+    backend_url = os.environ.get("BACKEND_URL", "http://localhost:8001").rstrip("/")
+    fup_id = secrets.token_hex(8)
+    pixel_url = f"{backend_url}/api/track/pixel/{fup_id}.png"
+    pixel_html = f'<img src="{pixel_url}" width="1" height="1" style="display:none;" />'
+    full_body = f"{msg_text}<br/><br/>{pixel_html}"
+    
+    # Try to find the original thread info to reply in the same thread
+    thread_id, parent_msg_id = await find_thread_info(user["access_token"], em["recipient"], em["subject"])
+    
+    success = await send_gmail_message(
+        user["access_token"], 
+        em["recipient"], 
+        f"Re: {em['subject']}", 
+        full_body,
+        thread_id=thread_id,
+        parent_msg_id=parent_msg_id
+    )
+    
+    if success:
+        # Record it as a sent follow-up in the history
+        await db.follow_ups.insert_one({
+            "id": fup_id,
+            "user_id": user["user_id"],
+            "tracked_email_id": tid,
+            "recipient": em["recipient"],
+            "subject": f"Re: {em['subject']}",
+            "message": msg_text,
+            "days_delay": 0,
+            "scheduled_at": datetime.now(timezone.utc).isoformat(),
+            "mode": "auto",
+            "sent": True,
+            "sent_at": datetime.now(timezone.utc).isoformat(),
+            "trigger_condition": "test"
+        })
+        
+        await db.tracked_emails.update_one({"id": tid}, {"$inc": {"follow_up_count": 1}})
+        return {"ok": True, "message": "Test follow-up sent successfully via Gmail API"}
+    else:
+        # If we reached here, the Gmail send failed.
+        raise HTTPException(status_code=401, detail="GMAIL_TOKEN_EXPIRED")
+
+# ---------- Gmail API Integration ----------
+async def find_thread_info(access_token: str, recipient: str, subject: str):
+    """Searches for the threadId and Message-ID of the original sent email."""
+    # We search in 'sent' for messages to the recipient with the specific subject
+    # We use a slightly looser search to ensure we find it
+    query = f'to:{recipient} subject:"{subject}"'
+    url = f"https://gmail.googleapis.com/gmail/v1/users/me/messages?q={query}"
+    async with httpx.AsyncClient() as client:
+        r = await client.get(url, headers={"Authorization": f"Bearer {access_token}"})
+        if r.status_code == 200:
+            data = r.json()
+            if data.get("messages"):
+                # Get the most recent matching message
+                msg_summary = data["messages"][0]
+                tid = msg_summary.get("threadId")
+                mid = msg_summary.get("id")
+                
+                # We need the actual 'Message-ID' header for threading
+                detail_url = f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{mid}"
+                dr = await client.get(detail_url, headers={"Authorization": f"Bearer {access_token}"})
+                if dr.status_code == 200:
+                    ddata = dr.json()
+                    headers = ddata.get("payload", {}).get("headers", [])
+                    msg_id_header = next((h["value"] for h in headers if h["name"].lower() == "message-id"), None)
+                    return tid, msg_id_header
+    return None, None
+
+async def send_gmail_message(access_token: str, recipient: str, subject: str, body_html: str, thread_id: str = None, parent_msg_id: str = None):
+    """Sends an email using the Gmail API as a threaded reply."""
+    url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
+    
+    from email.mime.text import MIMEText
+    message = MIMEText(body_html, "html")
+    message["to"] = recipient
+    message["subject"] = subject
+    
+    if parent_msg_id:
+        # Crucial for grouping in most email clients
+        message["In-Reply-To"] = parent_msg_id
+        message["References"] = parent_msg_id
+    
+    raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+    
+    payload = {"raw": raw}
+    if thread_id:
+        payload["threadId"] = thread_id
+    
+    async with httpx.AsyncClient() as client:
+        r = await client.post(
+            url,
+            headers={"Authorization": f"Bearer {access_token}"},
+            json=payload
+        )
+        return r.status_code == 200
+
+async def automation_worker():
+    """Background task that sends due 'auto' follow-ups via Gmail API."""
+    while True:
+        try:
+            # 1. Fetch due follow-ups that are in 'auto' mode and not yet sent
+            now_iso = datetime.now(timezone.utc).isoformat()
+            dues = await db.follow_ups.find({
+                "sent": False,
+                "mode": "auto",
+                "scheduled_at": {"$lte": now_iso}
+            }).to_list(50)
+            
+            for f in dues:
+                # 2. Check conditions (if_not_opened, etc.)
+                em = await db.tracked_emails.find_one({"id": f["tracked_email_id"]})
+                if not em: continue
+                
+                # 2. PROACTIVE REPLY CHECK
+                # Before sending ANY follow-up, we check Gmail one last time 
+                # to see if the user replied but the extension hasn't seen it yet.
+                is_replied = em.get("replied", False)
+                if not is_replied and user.get("access_token") and em.get("gmail_thread_id"):
+                    async with httpx.AsyncClient() as client:
+                        thread_url = f"https://gmail.googleapis.com/gmail/v1/users/me/threads/{em['gmail_thread_id']}"
+                        r = await client.get(thread_url, headers={"Authorization": f"Bearer {user['access_token']}"})
+                        if r.status_code == 200:
+                            msgs = r.json().get("messages", [])
+                            my_email = user["email"].lower()
+                            for m in msgs:
+                                hds = m.get("payload", {}).get("headers", [])
+                                frm = next((h["value"].lower() for h in hds if h["name"].lower() == "from"), "")
+                                if frm and my_email not in frm:
+                                    # FOUND A REPLY!
+                                    await db.tracked_emails.update_one({"id": em["id"]}, {"$set": {"replied": True}})
+                                    await db.follow_ups.delete_many({"tracked_email_id": em["id"], "sent": False})
+                                    is_replied = True
+                                    logging.info(f"Proactive detection: Lead {em['recipient']} replied to {em['id']}. Automation stopped.")
+                                    break
+
+                cond = f.get("trigger_condition", "always")
+                is_opened = em.get("open_count", 0) > 0
+                
+                should_send = False
+                if cond == "always": 
+                    should_send = True
+                elif cond == "if_not_opened": 
+                    should_send = not is_opened
+                elif cond == "if_not_replied": 
+                    should_send = not is_replied
+                elif cond == "if_opened_no_reply":
+                    should_send = is_opened and not is_replied
+                
+                if is_replied: should_send = False
+                
+                if should_send:
+                    user = await db.users.find_one({"user_id": f["user_id"]})
+                    if user and user.get("access_token"):
+                        # 3. Inject tracking pixel
+                        # Use the original TID for tracking
+                        # We need a base URL for the pixel. 
+                        # In production this should be a real domain.
+                        # Find original thread and message ID for perfect threading
+                        thread_id, parent_msg_id = await find_thread_info(user["access_token"], em["recipient"], em["subject"])
+                        
+                        # Use follow-up ID for pixel tracking
+                        backend_url = os.environ.get("BACKEND_URL", "http://localhost:8001").rstrip("/")
+                        pixel_url = f"{backend_url}/api/track/pixel/{f['id']}.png"
+                        pixel_html = f'<img src="{pixel_url}" width="1" height="1" style="display:none;" />'
+                        full_body = f"{f['message']}<br/><br/>{pixel_html}"
+                        
+                        success = await send_gmail_message(
+                            user["access_token"], 
+                            f["recipient"], 
+                            f["subject"], 
+                            full_body,
+                            thread_id=thread_id,
+                            parent_msg_id=parent_msg_id
+                        )
+                        if success:
+                            # 4. Mark as sent
+                            await db.follow_ups.update_one(
+                                {"id": f["id"]},
+                                {"$set": {"sent": True, "sent_at": datetime.now(timezone.utc).isoformat()}}
+                            )
+                            await db.tracked_emails.update_one(
+                                {"id": em["id"]},
+                                {"$inc": {"follow_up_count": 1}}
+                            )
+                            logging.info(f"Auto follow-up sent to {f['recipient']} for {em['id']}")
+        except Exception as e:
+            logging.error(f"Automation worker error: {e}")
+            
+        await asyncio.sleep(60) # Run every minute
+
+async def check_all_replies():
+    """Background task to scan ALL pending emails for replies."""
+    while True:
+        try:
+            # Find emails that haven't been replied to yet
+            pending = await db.tracked_emails.find({"replied": {"$ne": True}}).to_list(1000)
+            
+            for em in pending:
+                user = await db.users.find_one({"user_id": em["user_id"]})
+                if not user or not user.get("access_token"):
+                    continue
+                
+                tid = em.get("gmail_thread_id")
+                
+                async with httpx.AsyncClient() as client:
+                    # 1. DISCOVERY: If we don't have a thread ID, search for it
+                    if not tid:
+                        query = f'to:{em["recipient"]} subject:"{em["subject"]}"'
+                        search_url = f"https://gmail.googleapis.com/gmail/v1/users/me/messages?q={query}&maxResults=1"
+                        r = await client.get(search_url, headers={"Authorization": f"Bearer {user['access_token']}"})
+                        if r.status_code == 200:
+                            msgs = r.json().get("messages", [])
+                            if msgs:
+                                msg_info = await client.get(f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msgs[0]['id']}", headers={"Authorization": f"Bearer {user['access_token']}"})
+                                if msg_info.status_code == 200:
+                                    tid = msg_info.json().get("threadId")
+                                    await db.tracked_emails.update_one({"id": em["id"]}, {"$set": {"gmail_thread_id": tid}})
+                                    logging.info(f"Auto-discovered Thread ID for {em['id']}: {tid}")
+
+                    # 2. SCAN: If we have a thread ID (discovered or existing), check for replies
+                    if tid:
+                        thread_url = f"https://gmail.googleapis.com/gmail/v1/users/me/threads/{tid}"
+                        r = await client.get(thread_url, headers={"Authorization": f"Bearer {user['access_token']}"})
+                        if r.status_code == 200:
+                            msgs = r.json().get("messages", [])
+                            my_email = user["email"].lower()
+                            found_reply = False
+                            for m in msgs:
+                                hds = m.get("payload", {}).get("headers", [])
+                                frm = next((h["value"].lower() for h in hds if h["name"].lower() == "from"), "")
+                                if frm and my_email not in frm:
+                                    found_reply = True
+                                    break
+                            
+                            if found_reply:
+                                await db.tracked_emails.update_one({"id": em["id"]}, {"$set": {"replied": True}})
+                                await db.follow_ups.delete_many({"tracked_email_id": em["id"], "sent": False})
+                                logging.info(f"Background Sync: Lead {em['recipient']} reply detected. Moved to Active.")
+                                
+                                push_event(user["user_id"], {
+                                    "type": "reply",
+                                    "tracked_id": em["id"],
+                                    "recipient": em["recipient"],
+                                    "subject": em["subject"],
+                                    "ts": datetime.now(timezone.utc).isoformat()
+                                })
+            
+            # Wait 2 minutes before next scan
+            await asyncio.sleep(120) 
+        except Exception as e:
+            logging.error(f"Reply checker error: {e}")
+            await asyncio.sleep(60)
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(automation_worker())
+    asyncio.create_task(check_all_replies())
+
 # ---------- SSE notifications ----------
 @api_router.get("/events/stream")
-async def events_stream(request: Request, token: Optional[str] = None):
-    # Allow token via query for EventSource (cannot send headers/cookies cross-site reliably)
+async def events_stream(request: Request, token: Optional[str] = None, key: Optional[str] = None):
+    # Allow token via query for EventSource
     user = None
     if token:
         sess = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
         if sess:
             user = await db.users.find_one({"user_id": sess["user_id"]}, {"_id": 0})
+    elif key:
+        user = await db.users.find_one({"ext_api_key": key}, {"_id": 0})
+        
     if not user:
         try:
             user = await get_current_user(request)
@@ -804,7 +1247,7 @@ async def events_stream(request: Request, token: Optional[str] = None):
                 if await request.is_disconnected():
                     break
                 try:
-                    msg = await asyncio.wait_for(queue.get(), timeout=20)
+                    msg = await asyncio.wait_for(queue.get(), timeout=15)
                     yield f"data: {json.dumps(msg)}\n\n"
                 except asyncio.TimeoutError:
                     yield ": ping\n\n"
@@ -816,7 +1259,10 @@ async def events_stream(request: Request, token: Optional[str] = None):
 
     return StreamingResponse(gen(), media_type="text/event-stream", headers={
         "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
         "X-Accel-Buffering": "no",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Credentials": "true"
     })
 
 # ---------- root ----------

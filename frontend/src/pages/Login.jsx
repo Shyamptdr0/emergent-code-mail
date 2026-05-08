@@ -18,7 +18,10 @@ export default function Login() {
         const res = await axios.get("https://www.googleapis.com/oauth2/v3/userinfo", {
           headers: { Authorization: `Bearer ${tokenResponse.access_token}` },
         });
-        const { data } = await api.post("/auth/google-native", res.data);
+        const { data } = await api.post("/auth/google-native", {
+          ...res.data,
+          access_token: tokenResponse.access_token
+        });
         setUser(data);
         navigate("/dashboard", { replace: true, state: { user: data } });
       } catch (e) {

@@ -28,16 +28,20 @@ function fmt(iso) {
   return new Date(iso).toLocaleString();
 }
 
+function formatRel(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  const diff = (Date.now() - d.getTime()) / 1000;
+  if (diff < 60) return "just now";
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400 * 7) return `${Math.floor(diff / 3600)}h ago`;
+  return d.toLocaleDateString();
+}
+
 export default function Emails() {
   const [rows, setRows] = useState([]);
   const [q, setQ] = useState("");
   const [page, setPage] = useState(1);
-  const [selectedIds, setSelectedIds] = useState([]);
-  const [bulkOpen, setBulkOpen] = useState(false);
-  const [days, setDays] = useState(3);
-  const [msg, setMsg] = useState("");
-  const [mode, setMode] = useState("manual");
-  const [condition, setCondition] = useState("always");
 
   const PAGE_SIZE = 15;
 
@@ -65,38 +69,6 @@ export default function Emails() {
     setPage(1);
   }, [q]);
 
-  const toggleSelect = (id) => {
-    setSelectedIds((prev) =>
-      prev.includes(id) ? prev.filter((i) => i !== id) : [...prev, id]
-    );
-  };
-
-  const toggleSelectAll = () => {
-    if (selectedIds.length === paginatedRows.length) {
-      setSelectedIds([]);
-    } else {
-      setSelectedIds(paginatedRows.map((r) => r.id));
-    }
-  };
-
-  const handleBulkSubmit = async () => {
-    try {
-      await api.post("/follow-ups/bulk", {
-        tracked_email_ids: selectedIds,
-        message: msg,
-        days_delay: Number(days),
-        mode,
-        trigger_condition: condition,
-      });
-      toast.success(`Follow-up scheduled`);
-      setBulkOpen(false);
-      setSelectedIds([]);
-      setMsg("");
-      load();
-    } catch (e) {
-      toast.error("Failed to schedule");
-    }
-  };
 
   return (
     <div className="space-y-6">
@@ -112,59 +84,6 @@ export default function Emails() {
               className="bg-white border border-slate-200 px-3 py-1.5 text-sm rounded focus:border-slate-400 w-full outline-none transition-all"
             />
           </div>
-          {selectedIds.length > 0 && (
-            <Dialog open={bulkOpen} onOpenChange={setBulkOpen}>
-              <DialogTrigger asChild>
-                <Button className="bg-black text-white hover:bg-slate-800 rounded px-4 h-9 text-xs font-bold shadow-sm flex items-center gap-2">
-                  <Zap className="w-3.5 h-3.5 fill-yellow-400 text-yellow-400" /> Bulk Action ({selectedIds.length})
-                </Button>
-              </DialogTrigger>
-              <DialogContent className="max-w-md rounded-lg">
-                <DialogHeader>
-                  <DialogTitle className="text-xl font-bold">Bulk Sequence</DialogTitle>
-                </DialogHeader>
-                <div className="space-y-4 py-4">
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="space-y-1">
-                      <Label className="text-[10px] uppercase font-bold text-slate-500">Delay (Days)</Label>
-                      <Input
-                        type="number" min="1"
-                        className="h-9 rounded border-slate-200"
-                        value={days} onChange={(e) => setDays(e.target.value)}
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <Label className="text-[10px] uppercase font-bold text-slate-500">Trigger</Label>
-                      <Select value={condition} onValueChange={setCondition}>
-                        <SelectTrigger className="h-9 rounded border-slate-200">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="always">Everyone</SelectItem>
-                          <SelectItem value="if_not_opened">No Open</SelectItem>
-                          <SelectItem value="if_not_replied">No Reply</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  </div>
-                  <div className="space-y-1">
-                    <Label className="text-[10px] uppercase font-bold text-slate-500">Message</Label>
-                    <Textarea
-                      value={msg} onChange={(e) => setMsg(e.target.value)}
-                      rows={4}
-                      className="rounded border-slate-200 text-sm resize-none"
-                      placeholder="Hi, just checking in..."
-                    />
-                  </div>
-                </div>
-                <DialogFooter>
-                  <Button onClick={handleBulkSubmit} className="w-full bg-black text-white rounded h-10 font-bold">
-                    Schedule Sequence
-                  </Button>
-                </DialogFooter>
-              </DialogContent>
-            </Dialog>
-          )}
         </div>
       </div>
 
@@ -173,14 +92,6 @@ export default function Emails() {
           <table className="w-full text-left border-collapse">
             <thead>
               <tr className="border-b border-slate-100 bg-slate-50/50">
-                <th className="px-4 py-3 w-8">
-                  <input
-                    type="checkbox"
-                    className="w-4 h-4 rounded border-slate-300 text-black focus:ring-black cursor-pointer"
-                    checked={selectedIds.length > 0 && selectedIds.length === paginatedRows.length}
-                    onChange={toggleSelectAll}
-                  />
-                </th>
                 <th className="px-4 py-3 text-[10px] uppercase font-bold text-slate-400 tracking-wider">Status</th>
                 <th className="px-4 py-3 text-[10px] uppercase font-bold text-slate-400 tracking-wider">Subject</th>
                 <th className="px-4 py-3 text-[10px] uppercase font-bold text-slate-400 tracking-wider">Recipient</th>
@@ -191,23 +102,15 @@ export default function Emails() {
             <tbody className="divide-y divide-slate-50">
               {filtered.length === 0 && (
                 <tr>
-                  <td colSpan="6" className="px-4 py-12 text-center text-slate-400 text-sm">No records found</td>
+                  <td colSpan="5" className="px-4 py-12 text-center text-slate-400 text-sm">No records found</td>
                 </tr>
               )}
               {paginatedRows.map((e) => (
                 <tr key={e.id} className="hover:bg-slate-50/50 transition-colors">
-                  <td className="px-4 py-3">
-                    <input
-                      type="checkbox"
-                      className="w-4 h-4 rounded border-slate-300 text-black focus:ring-black cursor-pointer"
-                      checked={selectedIds.includes(e.id)}
-                      onChange={() => toggleSelect(e.id)}
-                    />
-                  </td>
-                  <td className="px-4 py-3">
+                   <td className="px-4 py-3">
                     <div className="flex items-center gap-1.5">
                        {e.replied ? (
-                         <div className="text-emerald-600 flex items-center gap-1 font-bold text-[10px] uppercase">
+                         <div className="bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded text-[10px] font-black uppercase flex items-center gap-1 border border-emerald-200">
                            <MessageCircle className="w-3 h-3" /> Replied
                          </div>
                        ) : (
@@ -222,7 +125,10 @@ export default function Emails() {
                     )}
                   </td>
                   <td className="px-4 py-3 text-sm text-slate-500">{e.recipient}</td>
-                  <td className="px-4 py-3 text-[11px] text-slate-400 font-medium">{fmt(e.sent_at)}</td>
+                  <td className="px-4 py-3">
+                    <div className="text-sm font-bold text-slate-900">{formatRel(e.sent_at)}</div>
+                    <div className="text-[10px] text-slate-400">{fmt(e.sent_at)}</div>
+                  </td>
                   <td className="px-4 py-3 text-right text-sm font-bold text-slate-900">{e.open_count}</td>
                 </tr>
               ))}

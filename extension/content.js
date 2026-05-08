@@ -30,7 +30,28 @@
   async function api(path, opts = {}) {
     const cfg = STATE.config;
     if (!cfg?.backend_url || !cfg?.ext_api_key) throw new Error("not_configured");
-    const r = await fetch(cfg.backend_url + path, {
+    
+    // Normalize baseUrl: remove trailing slash and trailing /api
+    let baseUrl = cfg.backend_url.trim().replace(/\/+$/, "");
+    if (baseUrl.toLowerCase().endsWith("/api")) {
+      baseUrl = baseUrl.substring(0, baseUrl.length - 4);
+    }
+    
+    // Construct clean URL
+    let cleanPath = path.trim();
+    if (!cleanPath.startsWith("/")) cleanPath = "/" + cleanPath;
+    
+    // If the path already starts with /api but the baseUrl ends with /api, remove one
+    if (cleanPath.startsWith("/api/") && baseUrl.toLowerCase().endsWith("/api")) {
+      baseUrl = baseUrl.substring(0, baseUrl.length - 4);
+    }
+    // If neither have /api, add it
+    if (!cleanPath.startsWith("/api/") && !baseUrl.toLowerCase().endsWith("/api")) {
+      baseUrl = baseUrl + "/api";
+    }
+
+    const finalUrl = baseUrl + cleanPath;
+    const r = await fetch(finalUrl, {
       ...opts,
       headers: {
         "Content-Type": "application/json",
@@ -267,7 +288,6 @@
     // 1. SCAN INBOX ROWS (List View)
     const rows = document.querySelectorAll('tr.zA, tr[role="row"]');
     rows.forEach((row) => {
-      // Gmail list-view subject can be in several places depending on density/view
       const subjEl = row.querySelector(".bog, .y6 span, .y2, .bAW");
       if (!subjEl) return;
       
@@ -276,8 +296,6 @@
       const match = STATE.sentMap[normalized];
       
       if (match && !match.replied && !pendingReplied.has(match.id)) {
-        // GMAIL INDICATORS FOR REPLY IN LIST VIEW:
-        // Check for thread count: .at, .byY, .bsU, .amH, .as (count in parentheses)
         const countEl = row.querySelector(".at, .byY, .bsU, .amH, .as, .bsU");
         const countText = countEl?.innerText || "";
         const countMatch = countText.match(/(\d+)/);
@@ -290,17 +308,32 @@
         // PROACTIVE SENDER CHECK:
         const senderEl = row.querySelector(".yP, .yW, .bA4, .zF, .vW");
         const senderText = senderEl?.innerText || "";
-        const isFromOthers = senderText && !senderText.toLowerCase().includes("me") && !senderText.toLowerCase().includes("to:");
+        
+        const myName = STATE.userProfile?.name?.toLowerCase();
+        const myEmail = STATE.userProfile?.email?.toLowerCase();
+        
+        // Gmail thread sender list is usually "Person1, Person2, me (3)"
+        const senderParts = senderText.split(/[,，]/).map(s => s.trim().toLowerCase());
+        
+        // Is there someone in this list who is NOT me?
+        const hasOthersInSenderList = senderParts.some(s => {
+          if (!s || s === "me" || s === "to:") return false;
+          if (myName && s.includes(myName)) return false;
+          if (myEmail && s.includes(myEmail)) return false;
+          return true;
+        });
+        
         const isUnread = row.classList.contains("zE");
 
-        // Proactive Logic: Catch it BEFORE opening
-        if (!isSentFolder && (count > 1 || (isUnread && isFromOthers) || (hasInboxLabel && isFromOthers))) {
-          markReplied(match, subjectText, `Auto-detected from List (Sender: ${senderText}, Count: ${count})`);
+        // Logic: Count as reply if there are multiple messages AND someone else is in the list,
+        // OR if it's an unread message from someone else.
+        if (!isSentFolder && hasOthersInSenderList && (count > 1 || isUnread || hasInboxLabel)) {
+          markReplied(match, subjectText, `Auto-detected from Inbox List (Senders: ${senderText}, Count: ${count})`);
         }
       }
     });
 
-    // 2. SCAN OPEN THREAD VIEW (Fallback)
+    // 2. SCAN OPEN THREAD VIEW
     const threadHeader = document.querySelector("h2[data-thread-perm-id], .hP");
     if (threadHeader) {
       const subjectText = threadHeader.innerText || "";
@@ -308,10 +341,29 @@
       const match = STATE.sentMap[normalized];
       
       if (match && !match.replied && !pendingReplied.has(match.id)) {
-        // .adn, .kv, .h7, .gE are various message containers
+        // Look at message containers
         const messages = document.querySelectorAll(".adn, .kv, .h7, .gE, .btm");
         if (messages.length > 1) {
-          markReplied(match, subjectText, `Detected from Thread View (${messages.length} messages)`);
+          // Check if any message is NOT from me
+          let foundRecipientReply = false;
+          const myName = STATE.userProfile?.name?.toLowerCase();
+          const myEmail = STATE.userProfile?.email?.toLowerCase();
+
+          messages.forEach(msg => {
+            const sender = msg.querySelector(".zF, .vW, .gD")?.innerText || "";
+            if (sender) {
+              const sLow = sender.toLowerCase();
+              let isMe = sLow.includes("me");
+              if (!isMe && myName && sLow.includes(myName)) isMe = true;
+              if (!isMe && myEmail && sLow.includes(myEmail)) isMe = true;
+              
+              if (!isMe) foundRecipientReply = true;
+            }
+          });
+          
+          if (foundRecipientReply) {
+            markReplied(match, subjectText, `Detected from Thread View (${messages.length} messages, reply found)`);
+          }
         }
       }
     }
@@ -320,21 +372,27 @@
   async function markReplied(match, subject, reason) {
     if (pendingReplied.has(match.id)) return;
     pendingReplied.add(match.id);
-    log("Reply detected for:", subject, reason);
+    log("Reply detected, verifying with server:", subject, reason);
     
     try {
-      await api(`/api/track/${match.id}/mark-replied`, { method: "POST" });
-      log("Successfully marked as replied:", subject);
-      match.replied = true; 
+      const res = await api(`/api/track/${match.id}/mark-replied`, { method: "POST" });
       
-      chrome.runtime.sendMessage({
-        type: "SHOW_INSTANT_NOTIFICATION",
-        tracked_id: match.id,
-        title: "Reply Detected! 🎯",
-        message: `Lead: ${match.recipient}\nAll sequences stopped.`
-      });
+      if (res.verified) {
+        log("Successfully verified and marked as replied:", subject);
+        match.replied = true; 
+        
+        chrome.runtime.sendMessage({
+          type: "SHOW_INSTANT_NOTIFICATION",
+          tracked_id: match.id,
+          title: "Reply Detected! 🎯",
+          message: `Lead: ${match.recipient}\nAll sequences stopped.`
+        });
 
-      loadEmails().then(renderTicks);
+        loadEmails().then(renderTicks);
+      } else {
+        log("Reply detection rejected by server verification", subject, res.status);
+        pendingReplied.delete(match.id);
+      }
     } catch (e) {
       console.warn("[MailTrack] mark-replied failed", e);
       pendingReplied.delete(match.id);
@@ -446,6 +504,25 @@
     STATE.config = await getConfig();
     if (STATE.dead) return;
     if (!STATE.config?.backend_url || !STATE.config?.ext_api_key) return;
+
+    // Fetch user profile to avoid self-reply detection
+    try {
+      const profile = await api("/api/ext-profile");
+      STATE.userProfile = profile;
+    } catch (e) {
+      console.warn("[MailTrack] profile fetch failed", e);
+      // Fallback: Try to find user identity in Gmail UI (top right account switcher)
+      const accountLabel = document.querySelector('a[aria-label*="Google Account:"]')?.getAttribute('aria-label') || "";
+      if (accountLabel) {
+        // e.g. "Google Account: Name (email@gmail.com)"
+        const match = accountLabel.match(/Google Account:\s*(.*?)\s*\((.*?)\)/i);
+        if (match) {
+          STATE.userProfile = { name: match[1], email: match[2] };
+          log("[MailTrack] Fallback identity detected from Gmail UI:", STATE.userProfile);
+        }
+      }
+    }
+
     await attachToCompose();
     await loadEmails();
     renderTicks();
@@ -539,8 +616,79 @@
     wrapper.parentNode.insertBefore(link, wrapper);
   }
 
-  // Call injectTopIcon inside tick or main loop
-  setInterval(injectTopIcon, 3000);
+  function showToast(msg) {
+    const id = "mt-toast-" + Date.now();
+    const div = document.createElement("div");
+    div.id = id;
+    div.style.cssText = "position:fixed; bottom:20px; left:20px; background:#1e293b; color:white; padding:12px 16px; border-radius:12px; font-family:Inter, sans-serif; font-size:13px; z-index:999999; display:flex; align-items:center; gap:12px; box-shadow:0 10px 15px -3px rgba(0,0,0,0.3); border:1px solid rgba(255,255,255,0.1); transform:translateY(100px); transition:transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1); cursor:pointer;";
+    div.innerHTML = `
+      <div style="background:#10b981; width:24px; height:24px; border-radius:6px; display:flex; align-items:center; justify-content:center; shrink:0;">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+      </div>
+      <div style="flex:1;">
+        <div style="font-weight:bold; margin-bottom:1px; display:flex; align-items:center; gap:6px;">
+          Email Opened!
+          <span style="font-size:9px; background:rgba(255,255,255,0.1); padding:1px 4px; border-radius:4px; opacity:0.7;">INSTANT</span>
+        </div>
+        <div style="opacity:0.8; font-size:11px;">${msg}</div>
+      </div>
+    `;
+    div.onclick = () => div.remove();
+    document.body.appendChild(div);
+    setTimeout(() => div.style.transform = "translateY(0)", 100);
+    setTimeout(() => {
+      div.style.transform = "translateY(100px)";
+      setTimeout(() => div.remove(), 300);
+    }, 5000);
+  }
 
-  log("content script v0.3.1 loaded");
+  function initSSE() {
+    if (STATE.sse || !STATE.config?.backend_url || !STATE.config?.ext_api_key) return;
+    
+    // Normalize baseUrl
+    let baseUrl = STATE.config.backend_url.trim().replace(/\/+$/, "");
+    if (baseUrl.toLowerCase().endsWith("/api")) {
+      baseUrl = baseUrl.substring(0, baseUrl.length - 4);
+    }
+    
+    const url = `${baseUrl}/api/events/stream?key=${STATE.config.ext_api_key}`;
+    log("[SSE] Connecting to:", url);
+    
+    try {
+      const es = new EventSource(url);
+      STATE.sse = es;
+      
+      es.onopen = () => {
+        log("[SSE] Connection established and active");
+      };
+
+      es.onmessage = (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          if (data.type === "open") {
+            log("[SSE] Instant open detected:", data);
+            showToast(`${data.recipient} opened your email: ${data.subject}`);
+            renderTicks();
+          }
+        } catch (err) {}
+      };
+      
+      es.onerror = (e) => {
+        log("[SSE] Connection error, retrying in 10s...");
+        es.close();
+        STATE.sse = null;
+      };
+    } catch (e) {
+      log("[SSE] Setup failed:", e);
+      STATE.sse = null;
+    }
+  }
+
+  // Call injectTopIcon inside tick or main loop
+  setInterval(() => {
+    injectTopIcon();
+    initSSE();
+  }, 3000);
+
+  log("content script v0.4.0 loaded with Real-Time Support");
 })();

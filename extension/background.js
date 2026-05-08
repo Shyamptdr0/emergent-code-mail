@@ -45,9 +45,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 async function poll() {
   const cfg = await new Promise((res) =>
-    chrome.storage.sync.get(["backend_url", "ext_api_key"], (v) => res(v))
+    chrome.storage.sync.get(["backend_url", "ext_api_key"], (v) => res(v || {}))
   );
-  if (!cfg.backend_url || !cfg.ext_api_key) return;
+  if (!cfg || !cfg.backend_url || !cfg.ext_api_key) return;
 
   try {
     const r = await fetch(cfg.backend_url + "/api/emails/by-ext", {
