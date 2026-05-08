@@ -194,7 +194,13 @@
 
   // ---------- Render sent-folder ticks ----------
   function normalizeSubject(s) {
-    return (s || "").toLowerCase().replace(/^(re|fwd):\s*/i, "").trim();
+    let subject = (s || "").toLowerCase();
+    // Recursively remove ALL prefixes like Re:, Fwd:, AW:, etc.
+    const prefixRegex = /^(re|fwd|aw|antw|wg|reply|forward|回复|转发):\s*/i;
+    while (prefixRegex.test(subject)) {
+      subject = subject.replace(prefixRegex, "");
+    }
+    return subject.trim();
   }
 
   async function loadEmails() {
@@ -204,11 +210,14 @@
       list.forEach((e) => {
         const k = normalizeSubject(e.subject);
         if (!k) return;
+        // Keep the most recent one if duplicates exist
         if (!STATE.sentMap[k] || new Date(e.sent_at) > new Date(STATE.sentMap[k].sent_at)) {
           STATE.sentMap[k] = e;
         }
       });
-    } catch {}
+    } catch (err) {
+      console.warn("[MailTrack] loadEmails failed", err);
+    }
   }
 
   function makeTickEl(email) {
@@ -255,10 +264,11 @@
   async function detectReplies() {
     if (STATE.dead || !STATE.config?.backend_url) return;
     
-    // 1. SCAN INBOX ROWS
+    // 1. SCAN INBOX ROWS (List View)
     const rows = document.querySelectorAll('tr.zA, tr[role="row"]');
     rows.forEach((row) => {
-      const subjEl = row.querySelector(".bog") || row.querySelector(".y6 span");
+      // Gmail list-view subject can be in several places depending on density/view
+      const subjEl = row.querySelector(".bog, .y6 span, .y2, .bAW");
       if (!subjEl) return;
       
       const subjectText = subjEl.innerText || "";
@@ -267,7 +277,8 @@
       
       if (match && !match.replied && !pendingReplied.has(match.id)) {
         // GMAIL INDICATORS FOR REPLY IN LIST VIEW:
-        const countEl = row.querySelector(".at, .byY, .bsU, .amH, .as");
+        // Check for thread count: .at, .byY, .bsU, .amH, .as (count in parentheses)
+        const countEl = row.querySelector(".at, .byY, .bsU, .amH, .as, .bsU");
         const countText = countEl?.innerText || "";
         const countMatch = countText.match(/(\d+)/);
         const count = countMatch ? parseInt(countMatch[1]) : 1;
@@ -276,14 +287,20 @@
         const hasInboxLabel = labels.includes("Inbox") || !!row.querySelector('div[aria-label="Inbox"]');
         const isSentFolder = window.location.hash.includes("sent") || window.location.href.includes("sent");
         
-        // If it's in the inbox OR has multiple messages, it's a reply
-        if ((count > 1 || hasInboxLabel) && !isSentFolder) {
-          markReplied(match, subjectText, `Count: ${count}`);
+        // PROACTIVE SENDER CHECK:
+        const senderEl = row.querySelector(".yP, .yW, .bA4, .zF, .vW");
+        const senderText = senderEl?.innerText || "";
+        const isFromOthers = senderText && !senderText.toLowerCase().includes("me") && !senderText.toLowerCase().includes("to:");
+        const isUnread = row.classList.contains("zE");
+
+        // Proactive Logic: Catch it BEFORE opening
+        if (!isSentFolder && (count > 1 || (isUnread && isFromOthers) || (hasInboxLabel && isFromOthers))) {
+          markReplied(match, subjectText, `Auto-detected from List (Sender: ${senderText}, Count: ${count})`);
         }
       }
     });
 
-    // 2. SCAN OPEN THREAD VIEW
+    // 2. SCAN OPEN THREAD VIEW (Fallback)
     const threadHeader = document.querySelector("h2[data-thread-perm-id], .hP");
     if (threadHeader) {
       const subjectText = threadHeader.innerText || "";
@@ -291,11 +308,10 @@
       const match = STATE.sentMap[normalized];
       
       if (match && !match.replied && !pendingReplied.has(match.id)) {
-        // Count how many messages are in the current thread view
-        // .adn is a common message container class
-        const messages = document.querySelectorAll(".adn, .kv, .h7");
+        // .adn, .kv, .h7, .gE are various message containers
+        const messages = document.querySelectorAll(".adn, .kv, .h7, .gE, .btm");
         if (messages.length > 1) {
-          markReplied(match, subjectText, `Thread Size: ${messages.length}`);
+          markReplied(match, subjectText, `Detected from Thread View (${messages.length} messages)`);
         }
       }
     }
@@ -489,5 +505,42 @@
     tick();
   }, 5000);
   tick();
+
+  function injectTopIcon() {
+    if (document.getElementById("mt-dashboard-link")) return;
+    
+    // Find the settings gear
+    const settingsBtn = document.querySelector('div[aria-label="Settings"], a[aria-label="Settings"]');
+    if (!settingsBtn) return;
+
+    // Gmail wraps icons in a button-like div. We need to be a sibling of THAT wrapper.
+    const wrapper = settingsBtn.closest('.gb_A, .gb_ve, div[role="button"]') || settingsBtn.parentElement;
+    if (!wrapper || !wrapper.parentNode) return;
+
+    const link = document.createElement("a");
+    link.id = "mt-dashboard-link";
+    link.href = "https://emergent-code-mail.vercel.app";
+    link.target = "_blank";
+    link.title = "Open MailTrack Dashboard";
+    link.style.cssText = "display:inline-flex !important; align-items:center; justify-content:center; width:40px; height:40px; border-radius:50%; transition:background 0.2s; cursor:pointer; margin-right:4px; vertical-align:middle; text-decoration:none;";
+    
+    link.onmouseover = () => link.style.background = "rgba(60, 64, 67, 0.08)";
+    link.onmouseout = () => link.style.background = "transparent";
+
+    link.innerHTML = `
+      <div style="background: #10b981; width: 22px; height: 22px; border-radius: 6px; display: flex; align-items: center; justify-content: center; box-shadow: 0 1px 2px rgba(0,0,0,0.15);">
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="white" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M2 12l5 5L14 8"/><path d="M12 17l9-9"/>
+        </svg>
+      </div>
+    `;
+
+    // Insert as a sibling to the WRAPPER to ensure horizontal flex alignment
+    wrapper.parentNode.insertBefore(link, wrapper);
+  }
+
+  // Call injectTopIcon inside tick or main loop
+  setInterval(injectTopIcon, 3000);
+
   log("content script v0.3.1 loaded");
 })();

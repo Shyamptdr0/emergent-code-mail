@@ -126,8 +126,12 @@ export default function Landing() {
       </section>
 
       <footer className="bg-[#0A0A0A] text-slate-400 border-t border-slate-800">
-        <div className="max-w-7xl mx-auto px-6 py-8 text-xs flex justify-between">
-          <span>© 2026 MailTrack</span>
+        <div className="max-w-7xl mx-auto px-6 py-8 text-xs flex flex-col sm:flex-row justify-between items-center gap-4">
+          <div className="flex items-center gap-6">
+            <span>© 2026 MailTrack</span>
+            <Link to="/privacy" className="hover:text-white transition-colors" id="privacy-link">Privacy Policy</Link>
+            <Link to="/terms" className="hover:text-white transition-colors" id="terms-link">Terms of Service</Link>
+          </div>
           <span className="font-mono">v0.1 · MVP</span>
         </div>
       </footer>

@@ -12,6 +12,8 @@ import ActiveMails from "@/pages/ActiveMails";
 import Automation from "@/pages/Automation";
 import FollowUps from "@/pages/FollowUps";
 import Settings from "@/pages/Settings";
+import Privacy from "@/pages/Privacy";
+import Terms from "@/pages/Terms";
 import AppShell from "@/components/AppShell";
 
 function AppRouter() {
@@ -28,6 +30,8 @@ function AppRouter() {
       <Route path="/automation" element={<AppShell><Automation /></AppShell>} />
       <Route path="/follow-ups" element={<AppShell><FollowUps /></AppShell>} />
       <Route path="/settings" element={<AppShell><Settings /></AppShell>} />
+      <Route path="/privacy" element={<Privacy />} />
+      <Route path="/terms" element={<Terms />} />
     </Routes>
   );
 }
