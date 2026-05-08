@@ -484,6 +484,75 @@ async def mark_notified(tid: str, update: NotifiedUpdate, user: dict = Depends(g
     )
     return {"ok": True}
 
+@api_router.get("/track/pixel/{tid}.png")
+async def track_pixel(tid: str, request: Request):
+    """The heart of the tracking system. Serves a 1x1 pixel and records the open."""
+    ts = datetime.now(timezone.utc).isoformat()
+    ua = request.headers.get("user-agent", "")
+    ip = get_client_ip(request)
+    
+    # Extract original TID if this is a follow-up
+    is_fup = False
+    original_tid = tid
+    fup = await db.follow_ups.find_one({"id": tid})
+    if fup:
+        is_fup = True
+        original_tid = fup["tracked_email_id"]
+
+    em = await db.tracked_emails.find_one({"id": original_tid})
+    if em:
+        # Check if the user is currently viewing the email (Self-View Protection)
+        until_str = em.get("self_viewing_until")
+        is_self_viewing = False
+        if until_str:
+            until_dt = datetime.fromisoformat(until_str)
+            if until_dt.tzinfo is None: until_dt = until_dt.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) < until_dt:
+                is_self_viewing = True
+
+        sent_at = datetime.fromisoformat(em["sent_at"]) if isinstance(em["sent_at"], str) else em["sent_at"]
+        if sent_at.tzinfo is None: sent_at = sent_at.replace(tzinfo=timezone.utc)
+        seconds_since_send = (datetime.now(timezone.utc) - sent_at).total_seconds()
+
+        scanner_ip_prefixes = ("66.249.", "64.233.", "209.85.", "72.14.", "216.58.", "172.217.")
+        is_google_scanner_ip = ip.startswith(scanner_ip_prefixes) if ip else False
+        is_image_proxy = ("GoogleImageProxy" in ua) or ("ggpht.com" in ua)
+
+        is_scan = (
+            seconds_since_send < 2                      # 2s grace covers immediate Gmail scan
+            or is_self_viewing                          # explicit thread-view ping from extension
+            or (is_google_scanner_ip and not is_image_proxy)
+            or "Google-Read-Aloud" in ua
+        )
+
+        collection = db.follow_ups if is_fup else db.tracked_emails
+
+        if is_scan:
+            await collection.update_one({"id": tid}, {
+                "$inc": {"scan_count": 1},
+                "$push": {"scans": {"ts": ts, "ua": ua, "ip": ip}}
+            })
+        else:
+            await collection.update_one({"id": tid}, {
+                "$inc": {"open_count": 1},
+                "$set": {"last_opened_at": ts},
+                "$push": {"opens": {"ts": ts, "ua": ua, "ip": ip}}
+            })
+            # Notify instantly
+            push_event(em["user_id"], {
+                "type": "open",
+                "tracked_id": tid,
+                "recipient": em["recipient"],
+                "subject": em["subject"],
+                "ts": ts,
+                "is_followup": is_fup
+            })
+
+    return Response(content=PIXEL_PNG, media_type="image/png", headers={
+        "Cache-Control": "private, no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
+        "Pragma": "no-cache", "Expires": "0"
+    })
+
 @api_router.post("/track/{tid}/extension-open")
 async def extension_assisted_open(tid: str, request: Request, user: dict = Depends(get_user_by_ext_key)):
     """Extension calls this when it detects a tracked email being opened. 
@@ -521,111 +590,116 @@ async def extension_assisted_open(tid: str, request: Request, user: dict = Depen
         {
             "$inc": {"open_count": 1},
             "$set": {"last_opened_at": ts},
-            "$push": {"opens": {"ts": ts, "ua": ua, "ip": ip, "method": "extension"}},
-        },
+            "$push": {"opens": {"ts": ts, "ua": ua, "ip": ip}},
+        }
     )
+    
     push_event(em["user_id"], {
         "type": "open",
         "tracked_id": tid,
         "recipient": em["recipient"],
         "subject": em["subject"],
-        "ts": ts,
+        "ts": ts
     })
     return {"ok": True}
 
+@api_router.get("/emails")
+async def list_emails(user: dict = Depends(get_current_user)):
+    return await db.tracked_emails.find({"user_id": user["user_id"]}, {"_id": 0}).sort("sent_at", -1).to_list(100)
+
+@api_router.get("/emails/by-ext")
+async def list_emails_by_ext(user: dict = Depends(get_user_by_ext_key)):
+    return await db.tracked_emails.find({"user_id": user["user_id"]}, {"_id": 0}).sort("sent_at", -1).to_list(100)
+
+@api_router.get("/emails/{tid}")
+async def get_email_detail(tid: str, user: dict = Depends(get_current_user)):
+    em = await db.tracked_emails.find_one({"id": tid, "user_id": user["user_id"]}, {"_id": 0})
+    if not em: raise HTTPException(404)
+    fups = await db.follow_ups.find({"tracked_email_id": tid}, {"_id": 0}).sort("scheduled_at", 1).to_list(100)
+    return {**em, "follow_ups": fups}
+
 @api_router.get("/track/pixel/{tid}.png")
 async def track_pixel(tid: str, request: Request):
-    em = await db.tracked_emails.find_one({"id": tid}, {"_id": 0})
-    if em:
-        # Ignore completely if the email hasn't been sent yet (compose window pixel load)
-        if em.get("status") == "draft":
-            headers = {
-                "Content-Type": "image/png",
-                "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
-                "Pragma": "no-cache",
-                "Expires": "0",
-            }
-            return FastResponse(content=PIXEL_PNG, media_type="image/png", headers=headers)
+    """The heart of the tracking system. Serves a 1x1 pixel and records the open."""
+    # 1. Identify if this is a follow-up or a main email
+    is_fup = False
+    original_tid = tid
+    fup = await db.follow_ups.find_one({"id": tid})
+    if fup:
+        is_fup = True
+        original_tid = fup["tracked_email_id"]
 
-        # Delay processing by 2 seconds. This perfectly solves the race condition
-        # allowing the sender's extension to fire the /mark-viewing signal 
-        # BEFORE we evaluate whether this hit is a self-view or not.
-        await asyncio.sleep(2.0)
+    em = await db.tracked_emails.find_one({"id": original_tid})
+    if not em:
+        return FastResponse(content=PIXEL_PNG, media_type="image/png")
 
-        # Re-fetch the email to get the updated self_viewing_until flag!
-        em = await db.tracked_emails.find_one({"id": tid}, {"_id": 0})
-        if not em:
-            return FastResponse(content=PIXEL_PNG, media_type="image/png")
+    # Ignore draft loads
+    if em.get("status") == "draft":
+        return FastResponse(content=PIXEL_PNG, media_type="image/png")
 
-        ua = request.headers.get("user-agent", "")
-        ip = get_client_ip(request)
-        ts = datetime.now(timezone.utc).isoformat()
+    # Wait for extension to ping /mark-viewing
+    await asyncio.sleep(2.0)
+    
+    # Re-fetch for updated self-viewing flags
+    em = await db.tracked_emails.find_one({"id": original_tid})
+    if not em: return FastResponse(content=PIXEL_PNG, media_type="image/png")
 
-        sent_at_raw = em.get("sent_at")
-        sent_at = datetime.fromisoformat(sent_at_raw) if isinstance(sent_at_raw, str) else sent_at_raw
-        if sent_at and sent_at.tzinfo is None:
-            sent_at = sent_at.replace(tzinfo=timezone.utc)
-        seconds_since_send = (datetime.now(timezone.utc) - sent_at).total_seconds() if sent_at else 9999
+    ts = datetime.now(timezone.utc).isoformat()
+    ua = request.headers.get("user-agent", "")
+    ip = get_client_ip(request)
 
-        # Check self-viewing window — sender is currently looking at this email in Gmail
-        self_viewing_raw = em.get("self_viewing_until")
-        self_viewing_until = None
-        if self_viewing_raw:
-            self_viewing_until = datetime.fromisoformat(self_viewing_raw) if isinstance(self_viewing_raw, str) else self_viewing_raw
-            if self_viewing_until and self_viewing_until.tzinfo is None:
-                self_viewing_until = self_viewing_until.replace(tzinfo=timezone.utc)
-        is_self_viewing = bool(self_viewing_until and self_viewing_until > datetime.now(timezone.utc))
+    # Self-view protection
+    until_str = em.get("self_viewing_until")
+    is_self_viewing = False
+    if until_str:
+        until_dt = datetime.fromisoformat(until_str)
+        if until_dt.tzinfo is None: until_dt = until_dt.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) < until_dt:
+            is_self_viewing = True
 
-        # IP + UA based classification:
-        sender_ip = em.get("sender_ip", "")
-        scanner_ip_prefixes = ("66.249.", "64.233.", "209.85.", "72.14.", "216.58.", "172.217.")
-        is_google_scanner_ip = ip.startswith(scanner_ip_prefixes) if ip else False
-        is_image_proxy = ("GoogleImageProxy" in ua) or ("ggpht.com" in ua)
+    sent_at_raw = em.get("sent_at")
+    sent_at = datetime.fromisoformat(sent_at_raw) if isinstance(sent_at_raw, str) else sent_at_raw
+    if sent_at and sent_at.tzinfo is None: sent_at = sent_at.replace(tzinfo=timezone.utc)
+    seconds_since_send = (datetime.now(timezone.utc) - sent_at).total_seconds() if sent_at else 9999
 
-        is_scan = (
-            seconds_since_send < 2                      # 2s grace covers immediate Gmail scan
-            or is_self_viewing                          # explicit thread-view ping from extension
-            or (is_google_scanner_ip and not is_image_proxy)
-            or "Google-Read-Aloud" in ua
-        )
+    scanner_ip_prefixes = ("66.249.", "64.233.", "209.85.", "72.14.", "216.58.", "172.217.")
+    is_google_scanner_ip = ip.startswith(scanner_ip_prefixes) if ip else False
+    is_image_proxy = ("GoogleImageProxy" in ua) or ("ggpht.com" in ua)
 
-        print(f"[DEBUG] tid={tid} ip={ip} is_scan={is_scan} ua={ua[:50]} proxy={is_image_proxy}")
+    is_scan = (
+        seconds_since_send < 2 
+        or is_self_viewing 
+        or (is_google_scanner_ip and not is_image_proxy)
+        or "Google-Read-Aloud" in ua
+    )
 
-        # Record it
-        if is_scan:
-            await collection.update_one(
-                {"id": tid},
-                {
-                    "$inc": {"scan_count": 1},
-                    "$push": {"scans": {"ts": ts, "ua": ua, "ip": ip, "seconds_since_send": seconds_since_send}},
-                },
-            )
-        else:
-            await collection.update_one(
-                {"id": tid},
-                {
-                    "$inc": {"open_count": 1},
-                    "$set": {"last_opened_at": ts},
-                    "$push": {"opens": {"ts": ts, "ua": ua, "ip": ip}},
-                },
-            )
-            # Notify EVERY open instantly
-            push_event(em["user_id"], {
-                "type": "open",
-                "tracked_id": tid,
-                "recipient": em["recipient"],
-                "subject": em["subject"],
-                "ts": ts,
-                "is_followup": is_fup
-            })
+    collection = db.follow_ups if is_fup else db.tracked_emails
 
-    headers = {
-        "Content-Type": "image/png",
+    if is_scan:
+        await collection.update_one({"id": tid}, {
+            "$inc": {"scan_count": 1},
+            "$push": {"scans": {"ts": ts, "ua": ua, "ip": ip}}
+        })
+    else:
+        await collection.update_one({"id": tid}, {
+            "$inc": {"open_count": 1},
+            "$set": {"last_opened_at": ts},
+            "$push": {"opens": {"ts": ts, "ua": ua, "ip": ip}}
+        })
+        # Push notification
+        push_event(em["user_id"], {
+            "type": "open",
+            "tracked_id": tid,
+            "recipient": em["recipient"],
+            "subject": em["subject"],
+            "ts": ts,
+            "is_followup": is_fup
+        })
+
+    return FastResponse(content=PIXEL_PNG, media_type="image/png", headers={
         "Cache-Control": "private, no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
-        "Pragma": "no-cache",
-        "Expires": "0",
-    }
-    return FastResponse(content=PIXEL_PNG, media_type="image/png", headers=headers)
+        "Pragma": "no-cache", "Expires": "0"
+    })
 
 # ---------- Email queries ----------
 @api_router.get("/emails")
