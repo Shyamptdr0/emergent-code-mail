@@ -11,6 +11,8 @@ export default function Login() {
   const navigate = useNavigate();
 
   const login = useGoogleLogin({
+    scope: "https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.insert https://www.googleapis.com/auth/gmail.settings.basic https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.labels https://www.googleapis.com/auth/gmail.addons.current.action.compose https://www.googleapis.com/auth/gmail.addons.current.message.readonly",
+    prompt: "consent",
     onSuccess: async (tokenResponse) => {
       try {
         const res = await axios.get("https://www.googleapis.com/oauth2/v3/userinfo", {
