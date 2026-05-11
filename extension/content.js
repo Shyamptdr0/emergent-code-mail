@@ -18,7 +18,18 @@
       try {
         chrome.storage.sync.get(["backend_url", "ext_api_key"], (v) => {
           if (chrome.runtime.lastError) { STATE.dead = true; res({}); return; }
-          res(v || {});
+          const data = v || {};
+          
+          // AUTO-MIGRATION: If using the old Render URL, update to the new one automatically
+          const oldUrl = "mail-tracker-with-new.onrender.com";
+          const newUrl = "mail-tracker-follow-up.onrender.com";
+          if (data.backend_url && data.backend_url.includes(oldUrl)) {
+            data.backend_url = data.backend_url.replace(oldUrl, newUrl);
+            chrome.storage.sync.set({ backend_url: data.backend_url });
+            log("Auto-migrated backend URL to:", data.backend_url);
+          }
+          
+          res(data);
         });
       } catch (e) {
         STATE.dead = true;
@@ -69,20 +80,31 @@
       dlg.querySelector('div[role="button"][data-tooltip*="Send"]') ||
       dlg.querySelector('div[role="button"][aria-label*="Send"]') ||
       dlg.querySelector('div.T-I.J-J5-Ji.aoO') ||
-      dlg.querySelector('div[command="Send"]')
+      dlg.querySelector('div[command="Send"]') ||
+      dlg.querySelector('.v7') // New Gmail classes
     );
   }
   function findTo(dlg) {
-    const chip = dlg.querySelector("[email]");
-    if (chip) return chip.getAttribute("email");
-    const f = dlg.querySelector('textarea[name="to"], input[name="to"]');
-    return ((f?.value || f?.textContent || "").split(",")[0] || "").trim();
+    // 1. Check for standard Gmail chips
+    const chips = dlg.querySelectorAll("[email]");
+    if (chips.length > 0) return Array.from(chips).map(c => c.getAttribute("email")).join(", ");
+    
+    // 2. Check for hidden inputs or textareas
+    const f = dlg.querySelector('textarea[name="to"], input[name="to"], input[data-hovercard-id]');
+    if (f) return (f.value || f.textContent || "").trim();
+    
+    // 3. Last resort: look for anything that looks like an email in the recipient area
+    const recipientArea = dlg.querySelector('.vW, .oj');
+    if (recipientArea) return recipientArea.innerText.trim();
+
+    return "unknown";
   }
   function findSubject(dlg) {
-    return dlg.querySelector('input[name="subjectbox"]')?.value || "";
+    const s = dlg.querySelector('input[name="subjectbox"], input[placeholder="Subject"]');
+    return s?.value || "";
   }
   function findBody(dlg) {
-    return dlg.querySelector('div[g_editable="true"], div[contenteditable="true"][role="textbox"]');
+    return dlg.querySelector('div[g_editable="true"], div[contenteditable="true"][role="textbox"], .Am.Al.editable');
   }
 
   // ---------- Create tracking + inject pixel immediately when compose opens ----------
@@ -190,8 +212,7 @@
             // CRITICAL FIX: Google Image Proxy completely hides the original URL in quoted replies.
             // To guarantee old pixels are removed, we delete ANY 1x1 image or any image with left:-9999px
             // that doesn't belong to the current tracking ID.
-            const isTracker = src.includes("mail-tracker-with-new") || 
-                              src.includes("api/track/pixel") || 
+            const isTracker = src.includes("mail-tracker-follow-up") ||                               src.includes("api/track/pixel") || 
                               src.includes("api%2Ftrack%2Fpixel") ||
                               img.hasAttribute("data-mt-pixel") ||
                               style.includes("left:-9999px") ||

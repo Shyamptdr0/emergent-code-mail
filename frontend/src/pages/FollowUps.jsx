@@ -66,24 +66,28 @@ export default function FollowUps() {
         </div>
       </div>
 
-      <div className="bg-white border border-slate-200 rounded shadow-sm overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse">
-            <thead>
-              <tr className="border-b border-slate-100 bg-slate-50/50">
-                <th className="px-4 py-3 text-[10px] uppercase font-bold text-slate-400 tracking-wider">Status</th>
-                <th className="px-4 py-3 text-[10px] uppercase font-bold text-slate-400 tracking-wider">Subject & Message</th>
-                <th className="px-4 py-3 text-[10px] uppercase font-bold text-slate-400 tracking-wider">Recipient</th>
-                <th className="px-4 py-3 text-[10px] uppercase font-bold text-slate-400 tracking-wider">Timing</th>
-                <th className="px-4 py-3 text-[10px] uppercase font-bold text-slate-400 tracking-wider text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-50">
-              {loading ? (
-                <tr><td colSpan="5" className="px-4 py-12 text-center text-slate-400 text-sm">Loading...</td></tr>
-              ) : rows.length === 0 ? (
-                <tr><td colSpan="5" className="px-4 py-12 text-center text-slate-400 text-sm">No follow-ups scheduled</td></tr>
-              ) : (
+      {loading ? (
+        <div className="bg-white border border-slate-200 rounded p-20 flex flex-col items-center justify-center">
+          <div className="loader mb-4" />
+          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest animate-pulse">Syncing Pipeline...</p>
+        </div>
+      ) : (
+        <div className="bg-white border border-slate-200 rounded shadow-sm overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="border-b border-slate-100 bg-slate-50/50">
+                  <th className="px-4 py-3 text-[10px] uppercase font-bold text-slate-400 tracking-wider">Status</th>
+                  <th className="px-4 py-3 text-[10px] uppercase font-bold text-slate-400 tracking-wider">Subject & Message</th>
+                  <th className="px-4 py-3 text-[10px] uppercase font-bold text-slate-400 tracking-wider">Recipient</th>
+                  <th className="px-4 py-3 text-[10px] uppercase font-bold text-slate-400 tracking-wider">Timing</th>
+                  <th className="px-4 py-3 text-[10px] uppercase font-bold text-slate-400 tracking-wider text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-50">
+                {rows.length === 0 ? (
+                  <tr><td colSpan="5" className="px-4 py-12 text-center text-slate-400 text-sm">No follow-ups scheduled</td></tr>
+                ) : (
                 rows.map((f) => (
                   <tr key={f.id} className="hover:bg-slate-50/50 transition-colors">
                     <td className="px-4 py-3">
@@ -136,6 +140,7 @@ export default function FollowUps() {
           </table>
         </div>
       </div>
+      )}
     </div>
   );
 }

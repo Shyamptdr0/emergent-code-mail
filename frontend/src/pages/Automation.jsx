@@ -215,13 +215,19 @@ export default function Automation() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {rules.length === 0 && !loading && (
-          <div className="col-span-full bg-white border border-slate-200 rounded p-12 text-center">
-            <Calendar className="w-8 h-8 text-slate-100 mx-auto mb-3" />
-            <p className="text-[10px] font-bold text-slate-300 uppercase tracking-widest">No active campaigns</p>
-          </div>
-        )}
+      {loading ? (
+        <div className="bg-white border border-slate-200 rounded p-20 flex flex-col items-center justify-center">
+          <div className="loader mb-4" />
+          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest animate-pulse">Loading Campaigns...</p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {rules.length === 0 && (
+            <div className="col-span-full bg-white border border-slate-200 rounded p-12 text-center">
+              <Calendar className="w-8 h-8 text-slate-100 mx-auto mb-3" />
+              <p className="text-[10px] font-bold text-slate-300 uppercase tracking-widest">No active campaigns</p>
+            </div>
+          )}
 
         {rules.map((rule) => (
           <div key={rule.id} className="bg-white border border-slate-200 rounded p-5 hover:border-slate-400 transition-all group relative shadow-sm">
@@ -270,7 +276,8 @@ export default function Automation() {
             </div>
           </div>
         ))}
-      </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,4 +1,2 @@
 web: gunicorn -w 1 -k uvicorn.workers.UvicornWorker --worker-tmp-dir /dev/shm server:app
 
-
-

@@ -52,6 +52,7 @@ function formatRemaining(iso) {
 
 export default function Emails() {
   const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
   const [page, setPage] = useState(1);
 
@@ -59,10 +60,13 @@ export default function Emails() {
 
   const load = async () => {
     try {
+      setLoading(true);
       const { data } = await api.get("/emails");
       setRows(data);
     } catch (e) {
       toast.error("Failed to load emails");
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -117,7 +121,13 @@ export default function Emails() {
         </div>
       </div>
 
-      <div className="bg-white border border-slate-200 rounded shadow-sm overflow-hidden">
+      {loading ? (
+        <div className="bg-white border border-slate-200 rounded p-20 flex flex-col items-center justify-center">
+          <div className="loader mb-4" />
+          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest animate-pulse">Loading Outreach...</p>
+        </div>
+      ) : (
+        <div className="bg-white border border-slate-200 rounded shadow-sm overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse">
             <thead>
@@ -182,25 +192,7 @@ export default function Emails() {
                           </span>
                         </div>
                       </div>
-                    ) : (
-                      <div className="flex flex-col gap-1">
-                         <span className="text-[10px] text-slate-300 font-bold uppercase tracking-widest italic opacity-50">No Active Sequence</span>
-                         <button 
-                            onClick={async () => {
-                                try {
-                                    await api.post(`/track/update/${e.id}`, {}); 
-                                    toast.success("Automation Started");
-                                    load();
-                                } catch(err) {
-                                    toast.error("Failed to start automation");
-                                }
-                            }}
-                            className="text-[9px] font-bold text-slate-900 bg-white border border-slate-200 px-2 py-1 rounded hover:bg-slate-50 transition-colors w-fit flex items-center gap-1 shadow-sm"
-                         >
-                            <Zap className="w-2.5 h-2.5 fill-amber-500 text-amber-500" /> Start Campaign
-                         </button>
-                      </div>
-                    )}
+                    ) : null}
                   </td>
                   <td className="px-4 py-3 text-xs text-slate-500">
                     <div className="font-bold text-slate-900">{formatRel(e.last_activity_at || e.sent_at)}</div>
@@ -236,7 +228,8 @@ export default function Emails() {
             </div>
           </div>
         )}
-      </div>
+        </div>
+      )}
     </div>
   );
 }

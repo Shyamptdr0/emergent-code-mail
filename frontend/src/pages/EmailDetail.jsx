@@ -37,7 +37,12 @@ export default function EmailDetail() {
 
   const [showTimeline, setShowTimeline] = useState(false);
 
-  if (!em) return <div className="text-slate-500 font-mono text-sm p-10">Loading…</div>;
+  if (!em) return (
+    <div className="flex flex-col items-center justify-center py-40">
+      <div className="loader mb-4" />
+      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest animate-pulse">Retrieving conversation details...</p>
+    </div>
+  );
 
   return (
     <div className="space-y-8" data-testid="email-detail-root">
