@@ -142,24 +142,30 @@ export default function Emails() {
                     {e.replied ? (
                       <div className="flex flex-col">
                         <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest bg-emerald-50 px-2 py-1 rounded w-fit">Replied</span>
-                        <span className="text-[9px] text-slate-400 font-bold mt-1">Automation Stopped</span>
+                        <span className="text-[9px] text-slate-400 font-bold mt-1">Sequence Stopped</span>
                       </div>
                     ) : e.next_followup ? (
-                      <div className="flex flex-col">
-                        <div className="flex items-center gap-1">
-                          <span className="text-sm font-black text-slate-900">{e.next_followup.label}</span>
-                          {(e.next_followup.condition === "if_opened_no_reply" || e.next_followup.condition === "if_no_reply") && e.open_count === 0 ? (
-                            <span className="text-[8px] bg-slate-100 text-slate-500 px-1 rounded font-bold uppercase">Waiting for Open</span>
+                      <div className="flex flex-col group">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-sm font-black text-slate-900 group-hover:text-amber-600 transition-colors">{e.next_followup.label}</span>
+                          {(e.next_followup.condition === "if_no_open" || e.next_followup.condition === "if_opened_no_reply") && e.open_count === 0 ? (
+                            <div className="flex items-center gap-1 bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded text-[8px] font-bold uppercase border border-slate-200">
+                              <div className="w-1.5 h-1.5 rounded-full bg-slate-300 animate-pulse" />
+                              Waiting for Open
+                            </div>
                           ) : (
-                            <Zap className="w-3 h-3 text-amber-500 fill-amber-500" />
+                            <div className="flex items-center gap-1 bg-amber-50 text-amber-600 px-1.5 py-0.5 rounded text-[8px] font-bold uppercase border border-amber-100">
+                              <Zap className="w-2.5 h-2.5 fill-amber-500" />
+                              Active
+                            </div>
                           )}
                         </div>
-                        <span className="text-[10px] text-slate-500 font-bold uppercase tracking-tighter">
+                        <span className="text-[10px] text-slate-500 font-bold uppercase tracking-tighter mt-0.5">
                           {formatRemaining(e.next_followup.scheduled_at)}
                         </span>
                       </div>
                     ) : (
-                      <span className="text-[10px] text-slate-300 font-bold uppercase tracking-widest">No Sequence</span>
+                      <span className="text-[10px] text-slate-300 font-bold uppercase tracking-widest opacity-50 italic">No Active Sequence</span>
                     )}
                   </td>
                   <td className="px-4 py-3 text-xs text-slate-500">
