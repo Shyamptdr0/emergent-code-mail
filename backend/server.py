@@ -560,6 +560,46 @@ async def list_active_mails(page: int = 1, limit: int = 10, user: dict = Depends
         "pages": (total + limit - 1) // limit
     }
 
+@api_router.get("/emails/by-ext")
+async def list_emails_ext(user: dict = Depends(get_user_by_ext_key)):
+    """Extension calls this to get all tracked emails for ticks."""
+    cursor = db.tracked_emails.find({"user_id": user["user_id"]}, {"_id": 0})
+    return await cursor.sort("sent_at", -1).to_list(1000)
+
+@api_router.get("/events/stream")
+async def events_stream(key: str):
+    """Server-Sent Events for instant extension notifications."""
+    user = await db.users.find_one({"ext_api_key": key})
+    if not user:
+        raise HTTPException(401, "Invalid key")
+    
+    user_id = user["user_id"]
+    
+    async def event_generator():
+        queue = asyncio.Queue()
+        if user_id not in event_queues:
+            event_queues[user_id] = []
+        event_queues[user_id].append(queue)
+        
+        try:
+            yield f"data: {json.dumps({'type': 'connected'})}\n\n"
+            while True:
+                try:
+                    payload = await asyncio.wait_for(queue.get(), timeout=30.0)
+                    yield f"data: {json.dumps(payload)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if user_id in event_queues and queue in event_queues[user_id]:
+                event_queues[user_id].remove(queue)
+                if not event_queues[user_id]:
+                    del event_queues[user_id]
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
 @api_router.post("/track/heartbeat-viewing")
 async def heartbeat_viewing(payload: HeartbeatViewing, user: dict = Depends(get_user_by_ext_key)):
     """Bulk mark-viewing: extension sends list of currently-visible tracked email IDs
