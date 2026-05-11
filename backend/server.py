@@ -571,13 +571,9 @@ async def extension_assisted_open(tid: str, request: Request, user: dict = Depen
         }
     )
     
-    # Notify ONLY if we haven't notified in the last 10 seconds (Deduplication)
+    # Push notification ONLY once per email
     last_notified = em.get("last_notified_at")
-    should_notify = True
-    if last_notified:
-        ln_dt = datetime.fromisoformat(last_notified)
-        if (now - ln_dt.replace(tzinfo=timezone.utc)).total_seconds() < 10:
-            should_notify = False
+    should_notify = not bool(last_notified)
             
     if should_notify:
         await db.tracked_emails.update_one({"id": tid}, {"$set": {"last_notified_at": ts}})
@@ -624,8 +620,20 @@ async def track_pixel(tid: str, request: Request):
     if em.get("status") == "draft":
         return FastResponse(content=PIXEL_PNG, media_type="image/png")
 
+    # Check if there is a newer email sent to the same recipient.
+    # If so, we sleep longer to let the newer email register its open first!
+    newer_exists = False
+    if em.get("recipient") and em.get("sent_at"):
+        newer_exists_doc = await db.tracked_emails.find_one({
+            "user_id": em.get("user_id"),
+            "recipient": em.get("recipient"),
+            "sent_at": {"$gt": em.get("sent_at")}
+        })
+        if newer_exists_doc:
+            newer_exists = True
+
     # Wait for extension to ping /mark-viewing
-    await asyncio.sleep(2.0)
+    await asyncio.sleep(4.0 if newer_exists else 2.0)
     
     # Re-fetch for updated self-viewing flags
     em = await db.tracked_emails.find_one({"id": original_tid})
@@ -653,11 +661,29 @@ async def track_pixel(tid: str, request: Request):
     is_google_scanner_ip = ip.startswith(scanner_ip_prefixes) if ip else False
     is_image_proxy = ("GoogleImageProxy" in ua) or ("ggpht.com" in ua)
 
+    is_thread_preload = False
+    if newer_exists:
+        newer_opened = await db.tracked_emails.find_one({
+            "user_id": em.get("user_id"),
+            "recipient": em.get("recipient"),
+            "sent_at": {"$gt": em.get("sent_at")},
+            "last_opened_at": {"$exists": True}
+        }, sort=[("last_opened_at", -1)])
+        
+        if newer_opened and newer_opened.get("last_opened_at"):
+            last_op = datetime.fromisoformat(newer_opened["last_opened_at"])
+            if last_op.tzinfo is None: last_op = last_op.replace(tzinfo=timezone.utc)
+            # If a newer email to the same recipient was opened within the last 15 seconds,
+            # this is almost certainly a Gmail thread expansion preload. Suppress it!
+            if (datetime.now(timezone.utc) - last_op).total_seconds() < 15:
+                is_thread_preload = True
+
     is_scan = (
         seconds_since_send < 2 
         or is_self_viewing 
         or (em.get("sender_ip") and ip == em.get("sender_ip")) # IP-based self-view protection
         or (is_google_scanner_ip and not is_image_proxy)
+        or is_thread_preload
         or "Google-Read-Aloud" in ua
     )
 
@@ -674,14 +700,9 @@ async def track_pixel(tid: str, request: Request):
             "$set": {"last_opened_at": ts},
             "$push": {"opens": {"ts": ts, "ua": ua, "ip": ip}}
         })
-        # Push notification ONLY if not recently notified
+        # Push notification ONLY once per email
         last_notified = em.get("last_notified_at")
-        should_notify = True
-        now_dt = datetime.now(timezone.utc)
-        if last_notified:
-            ln_dt = datetime.fromisoformat(last_notified)
-            if (now_dt - ln_dt.replace(tzinfo=timezone.utc)).total_seconds() < 10:
-                should_notify = False
+        should_notify = not bool(last_notified)
 
         if should_notify:
             await db.tracked_emails.update_one({"id": original_tid}, {"$set": {"last_notified_at": ts}})

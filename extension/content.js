@@ -475,7 +475,17 @@
       const trackers = document.querySelectorAll('img[src*="api/track/pixel"], img[src*="api%2Ftrack%2Fpixel"], img[data-mt-pixel], .mt-wrapper img');
       let foundTid = null;
       trackers.forEach(img => {
+        // CRITICAL: Ignore pixels inside collapsed emails in a thread. 
+        // In Gmail, collapsed messages are hidden (display:none), so offsetParent is null.
+        if (img.offsetParent === null) return;
+
         let tid = img.getAttribute("data-mt-pixel");
+        if (!tid) {
+          const alt = img.getAttribute("alt") || "";
+          if (alt.startsWith("mt-")) {
+            tid = alt.replace("mt-", "");
+          }
+        }
         if (!tid) {
           let src = img.src || "";
           try { src = decodeURIComponent(src); } catch(e) {}
