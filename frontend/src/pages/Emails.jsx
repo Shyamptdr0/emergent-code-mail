@@ -126,8 +126,8 @@ export default function Emails() {
                   </td>
                   <td className="px-4 py-3 text-sm text-slate-500">{e.recipient}</td>
                   <td className="px-4 py-3">
-                    <div className="text-sm font-bold text-slate-900">{formatRel(e.sent_at)}</div>
-                    <div className="text-[10px] text-slate-400">{fmt(e.sent_at)}</div>
+                    <div className="text-sm font-bold text-slate-900">{formatRel(e.last_activity_at || e.sent_at)}</div>
+                    <div className="text-[10px] text-slate-400">{fmt(e.last_activity_at || e.sent_at)}</div>
                   </td>
                   <td className="px-4 py-3 text-right text-sm font-bold text-slate-900">{e.open_count}</td>
                 </tr>

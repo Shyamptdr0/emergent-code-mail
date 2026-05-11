@@ -1433,6 +1433,15 @@ async def check_all_replies():
 
 @app.on_event("startup")
 async def startup_event():
+    # MIGRATION: Ensure all emails have last_activity_at for consistent sorting
+    # We find all documents where last_activity_at is missing and set it to sent_at
+    cursor = db.tracked_emails.find({"last_activity_at": {"$exists": False}})
+    async for doc in cursor:
+        await db.tracked_emails.update_one(
+            {"_id": doc["_id"]},
+            {"$set": {"last_activity_at": doc.get("sent_at", datetime.now(timezone.utc).isoformat())}}
+        )
+    
     asyncio.create_task(automation_worker())
     asyncio.create_task(check_all_replies())
 

@@ -8,6 +8,16 @@ function fmt(iso) {
   return new Date(iso).toLocaleString();
 }
 
+function formatRel(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  const diff = (Date.now() - d.getTime()) / 1000;
+  if (diff < 60) return "just now";
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400 * 7) return `${Math.floor(diff / 3600)}h ago`;
+  return d.toLocaleDateString();
+}
+
 export default function ActiveMails() {
   const [data, setData] = useState({ items: [], total: 0, pages: 1 });
   const [loading, setLoading] = useState(true);
@@ -51,7 +61,7 @@ export default function ActiveMails() {
                 <th className="px-4 py-3 text-[10px] uppercase font-bold text-slate-400 tracking-wider">Status</th>
                 <th className="px-4 py-3 text-[10px] uppercase font-bold text-slate-400 tracking-wider">Subject</th>
                 <th className="px-4 py-3 text-[10px] uppercase font-bold text-slate-400 tracking-wider">Recipient</th>
-                <th className="px-4 py-3 text-[10px] uppercase font-bold text-slate-400 tracking-wider">Last Activity</th>
+                <th className="px-4 py-3 text-[10px] uppercase font-bold text-slate-400 tracking-wider">Replied At</th>
                 <th className="px-4 py-3 text-[10px] uppercase font-bold text-slate-400 tracking-wider text-right">Opens</th>
                 <th className="px-4 py-3 text-right"></th>
               </tr>
@@ -81,7 +91,10 @@ export default function ActiveMails() {
                       <Link to={`/emails/${e.id}`} className="text-sm font-bold text-slate-900 hover:underline">{e.subject || "(No Subject)"}</Link>
                     </td>
                     <td className="px-4 py-3 text-sm text-slate-500">{e.recipient}</td>
-                    <td className="px-4 py-3 text-[11px] text-slate-400 font-medium">{fmt(e.replied_at || e.last_activity_at || e.sent_at)}</td>
+                    <td className="px-4 py-3 text-[11px] text-slate-400 font-medium">
+                      <div className="text-sm font-bold text-slate-900">{formatRel ? formatRel(e.replied_at) : fmt(e.replied_at)}</div>
+                      <div className="text-[10px] text-slate-400">{fmt(e.replied_at)}</div>
+                    </td>
                     <td className="px-4 py-3 text-right text-sm font-bold text-slate-900">{e.open_count}</td>
                     <td className="px-4 py-3 text-right">
                       <Link to={`/emails/${e.id}`} className="p-1 text-slate-400 hover:text-black">
