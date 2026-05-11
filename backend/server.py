@@ -739,6 +739,33 @@ async def track_pixel(tid: str, request: Request):
                 "is_followup": is_fup
             })
 
+        # --- DYNAMIC RESCHEDULING ---
+        # If this was the FIRST open for this specific tracking ID (tid), 
+        # we reschedule all subsequent pending follow-ups relative to NOW.
+        # This fulfills the "if opened, next one is 3 days later" requirement.
+        current_open_count = em.get("open_count", 0)
+        if current_open_count == 0:
+            pending_fups = await db.follow_ups.find({
+                "tracked_email_id": original_tid,
+                "sent": False
+            }).sort("scheduled_at", 1).to_list(100)
+            
+            if pending_fups:
+                # Use current time as the new base for the sequence
+                ref_time = datetime.now(timezone.utc)
+                for p_fup in pending_fups:
+                    # If it's the first one, it's relative to 'now'
+                    # If it's subsequent, it cascades
+                    delay = p_fup.get("days_delay", 1)
+                    new_sched = get_next_business_time(ref_time, delay)
+                    await db.follow_ups.update_one(
+                        {"id": p_fup["id"]},
+                        {"$set": {"scheduled_at": new_sched.isoformat()}}
+                    )
+                    ref_time = new_sched # Cascade scheduling
+                    logging.info(f"Rescheduled follow-up {p_fup['id']} to {new_sched.isoformat()} due to engagement on {tid}")
+
+
     return FastResponse(content=PIXEL_PNG, media_type="image/png", headers={
         "Cache-Control": "private, no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
         "Pragma": "no-cache", "Expires": "0"
@@ -750,6 +777,41 @@ async def list_emails(user: dict = Depends(get_current_user)):
     rows = await db.tracked_emails.find(
         {"user_id": user["user_id"]}, {"_id": 0}
     ).sort("sent_at", -1).to_list(500)
+    
+    tids = [r["id"] for r in rows]
+    
+    # 1. Map sent counts
+    all_sent = await db.follow_ups.aggregate([
+        {"$match": {"tracked_email_id": {"$in": tids}, "sent": True}},
+        {"$group": {"_id": "$tracked_email_id", "count": {"$sum": 1}}}
+    ]).to_list(500)
+    sent_map = {s["_id"]: s["count"] for s in all_sent}
+    
+    # 2. Map next pending follow-up (earliest)
+    all_pending = await db.follow_ups.find(
+        {"tracked_email_id": {"$in": tids}, "sent": False}
+    ).sort("scheduled_at", 1).to_list(1000)
+    
+    pending_map = {}
+    for p in all_pending:
+        tid = p["tracked_email_id"]
+        if tid not in pending_map:
+            pending_map[tid] = p
+            
+    for r in rows:
+        tid = r["id"]
+        sent_count = sent_map.get(tid, 0)
+        p = pending_map.get(tid)
+        if p:
+            nth = sent_count + 1
+            suffix = "st" if nth == 1 else "nd" if nth == 2 else "rd" if nth == 3 else "th"
+            r["next_followup"] = {
+                "label": f"{nth}{suffix}",
+                "scheduled_at": p["scheduled_at"]
+            }
+        else:
+            r["next_followup"] = None
+            
     return rows
 
 @api_router.get("/emails/by-ext")

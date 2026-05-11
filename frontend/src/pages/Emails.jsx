@@ -38,12 +38,24 @@ function formatRel(iso) {
   return d.toLocaleDateString();
 }
 
+function formatRemaining(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  const diff = (d.getTime() - Date.now()) / 1000;
+  if (diff < 0) return "Due now";
+  if (diff < 3600) return `${Math.floor(diff / 60)}m remain`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h remain`;
+  const days = Math.floor(diff / 86400);
+  if (days === 1) return "tomorrow";
+  return `${days}d remain`;
+}
+
 export default function Emails() {
   const [rows, setRows] = useState([]);
   const [q, setQ] = useState("");
   const [page, setPage] = useState(1);
 
-  const PAGE_SIZE = 15;
+  const PAGE_SIZE = 10;
 
   const load = async () => {
     try {
@@ -95,6 +107,7 @@ export default function Emails() {
                 <th className="px-4 py-3 text-[10px] uppercase font-bold text-slate-400 tracking-wider">Status</th>
                 <th className="px-4 py-3 text-[10px] uppercase font-bold text-slate-400 tracking-wider">Subject</th>
                 <th className="px-4 py-3 text-[10px] uppercase font-bold text-slate-400 tracking-wider">Recipient</th>
+                <th className="px-4 py-3 text-[10px] uppercase font-bold text-slate-400 tracking-wider">Automation</th>
                 <th className="px-4 py-3 text-[10px] uppercase font-bold text-slate-400 tracking-wider">Sent</th>
                 <th className="px-4 py-3 text-[10px] uppercase font-bold text-slate-400 tracking-wider text-right">Opens</th>
               </tr>
@@ -102,7 +115,7 @@ export default function Emails() {
             <tbody className="divide-y divide-slate-50">
               {filtered.length === 0 && (
                 <tr>
-                  <td colSpan="5" className="px-4 py-12 text-center text-slate-400 text-sm">No records found</td>
+                  <td colSpan="6" className="px-4 py-12 text-center text-slate-400 text-sm">No records found</td>
                 </tr>
               )}
               {paginatedRows.map((e) => (
@@ -121,13 +134,37 @@ export default function Emails() {
                   <td className="px-4 py-3">
                     <Link to={`/emails/${e.id}`} className="text-sm font-bold text-slate-900 hover:underline">{e.subject || "(No Subject)"}</Link>
                     {e.follow_up_count > 0 && (
-                      <span className="ml-2 text-[9px] font-bold text-slate-400 uppercase tracking-tighter">+{e.follow_up_count} FUP</span>
+                       <span className="ml-2 text-[9px] font-bold text-slate-400 uppercase tracking-tighter">+{e.follow_up_count} FUP</span>
                     )}
                   </td>
                   <td className="px-4 py-3 text-sm text-slate-500">{e.recipient}</td>
                   <td className="px-4 py-3">
-                    <div className="text-sm font-bold text-slate-900">{formatRel(e.last_activity_at || e.sent_at)}</div>
-                    <div className="text-[10px] text-slate-400">{fmt(e.last_activity_at || e.sent_at)}</div>
+                    {e.replied ? (
+                      <div className="flex flex-col">
+                        <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest bg-emerald-50 px-2 py-1 rounded w-fit">Replied</span>
+                        <span className="text-[9px] text-slate-400 font-bold mt-1">Automation Stopped</span>
+                      </div>
+                    ) : e.next_followup ? (
+                      <div className="flex flex-col">
+                        <div className="flex items-center gap-1">
+                          <span className="text-sm font-black text-slate-900">{e.next_followup.label}</span>
+                          {(e.next_followup.condition === "if_opened_no_reply" || e.next_followup.condition === "if_no_reply") && e.open_count === 0 ? (
+                            <span className="text-[8px] bg-slate-100 text-slate-500 px-1 rounded font-bold uppercase">Waiting for Open</span>
+                          ) : (
+                            <Zap className="w-3 h-3 text-amber-500 fill-amber-500" />
+                          )}
+                        </div>
+                        <span className="text-[10px] text-slate-500 font-bold uppercase tracking-tighter">
+                          {formatRemaining(e.next_followup.scheduled_at)}
+                        </span>
+                      </div>
+                    ) : (
+                      <span className="text-[10px] text-slate-300 font-bold uppercase tracking-widest">No Sequence</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3 text-xs text-slate-500">
+                    <div className="font-bold text-slate-900">{formatRel(e.last_activity_at || e.sent_at)}</div>
+                    <div>{fmt(e.last_activity_at || e.sent_at)}</div>
                   </td>
                   <td className="px-4 py-3 text-right text-sm font-bold text-slate-900">{e.open_count}</td>
                 </tr>

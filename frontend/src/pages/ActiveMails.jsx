@@ -22,7 +22,7 @@ export default function ActiveMails() {
   const [data, setData] = useState({ items: [], total: 0, pages: 1 });
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
-  const LIMIT = 15;
+  const LIMIT = 10;
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -108,10 +108,10 @@ export default function ActiveMails() {
           </table>
         </div>
 
-        {totalPages > 1 && (
+        {data.total > 0 && (
           <div className="flex items-center justify-between px-4 py-3 border-t border-slate-100 bg-slate-50/30">
             <span className="text-[10px] font-bold text-slate-400 uppercase">
-              Page {page} of {totalPages}
+              Page {page} of {totalPages} — Total {data.total}
             </span>
             <div className="flex gap-2">
               <button
