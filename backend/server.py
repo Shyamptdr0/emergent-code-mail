@@ -42,13 +42,10 @@ db = client[os.environ['DB_NAME']]
 app = FastAPI()
 
 # --- CORS CONFIGURATION ---
-# Load origins from .env (separated by comma)
+# Robust origin parsing (handles spaces and trailing slashes)
+# Robust origin parsing from .env (handles spaces and trailing slashes)
 raw_origins = os.environ.get("CORS_ORIGINS", "")
-cors_origins = [o.strip() for o in raw_origins.split(",") if o.strip()]
-
-# Fallback to localhost if nothing is provided (for safety during development)
-if not cors_origins:
-    cors_origins = ["http://localhost:3000", "http://localhost:3001"]
+cors_origins = [o.strip().rstrip("/") for o in raw_origins.split(",") if o.strip()]
 
 
 app.add_middleware(
@@ -56,8 +53,9 @@ app.add_middleware(
     allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["Authorization", "Content-Type", "X-Ext-Key", "Accept", "Origin"],
 )
+
 
 
 async def get_user_by_ext_key(request: Request) -> dict:
