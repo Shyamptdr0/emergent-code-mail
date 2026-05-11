@@ -291,9 +291,13 @@ async def auth_google_native(payload: dict, response: Response):
         "created_at": datetime.now(timezone.utc).isoformat(),
     })
 
+    # On localhost (HTTP) secure=True blocks the cookie. Detect environment.
+    is_production = "localhost" not in os.environ.get("BACKEND_URL", "localhost")
     response.set_cookie(
         "session_token", session_token,
-        httponly=True, secure=True, samesite="none",
+        httponly=True,
+        secure=is_production,
+        samesite="none" if is_production else "lax",
         max_age=7 * 24 * 60 * 60, path="/",
     )
     return {
