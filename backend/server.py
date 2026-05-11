@@ -663,20 +663,13 @@ async def extension_assisted_open(tid: str, request: Request, user: dict = Depen
         })
     return {"ok": True}
 
-@api_router.get("/emails")
-async def list_emails(user: dict = Depends(get_current_user)):
-    return await db.tracked_emails.find({"user_id": user["user_id"]}, {"_id": 0}).sort("last_activity_at", -1).to_list(100)
-
-@api_router.get("/emails/by-ext")
-async def list_emails_by_ext(user: dict = Depends(get_user_by_ext_key)):
-    return await db.tracked_emails.find({"user_id": user["user_id"]}, {"_id": 0}).sort("last_activity_at", -1).to_list(100)
-
 @api_router.get("/emails/{tid}")
 async def get_email_detail(tid: str, user: dict = Depends(get_current_user)):
     em = await db.tracked_emails.find_one({"id": tid, "user_id": user["user_id"]}, {"_id": 0})
     if not em: raise HTTPException(404)
     fups = await db.follow_ups.find({"tracked_email_id": tid}, {"_id": 0}).sort("scheduled_at", 1).to_list(100)
     return {**em, "follow_ups": fups}
+
 
 @api_router.get("/track/pixel/{tid}.png")
 async def track_pixel(tid: str, request: Request):
@@ -1487,42 +1480,36 @@ async def automation_worker():
 
 
 async def check_all_replies():
-    """Background task to scan ALL pending emails for replies with 5-10s responsiveness."""
-    while True:
-        try:
-            # Find emails that haven't been replied to yet and were sent in the last 30 days
-            limit_date = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
-            pending = await db.tracked_emails.find({
-                "replied": {"$ne": True},
-                "sent_at": {"$gte": limit_date}
-            }).to_list(1000)
-            
-            # Group by user to minimize token refreshes
-            by_user = {}
-            for em in pending:
-                by_user.setdefault(em["user_id"], []).append(em)
-            
-            for uid, emails in by_user.items():
-                token = await ensure_google_token(uid)
-                if not token:
+    """Background task to scan pending emails for replies efficiently."""
+    logging.info("Reply detection worker started.")
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        while True:
+            try:
+                # Only check emails sent in the last 14 days to save RAM
+                limit_date = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
+                pending = await db.tracked_emails.find({
+                    "replied": {"$ne": True},
+                    "status": "sent",
+                    "sent_at": {"$gte": limit_date}
+                }).sort("last_activity_at", -1).to_list(15)
+                
+                if not pending:
+                    await asyncio.sleep(120)
                     continue
-                
-                user = await db.users.find_one({"user_id": uid})
-                my_email = user["email"].lower()
-                
-                async with httpx.AsyncClient() as client:
-                    for em in emails:
-                        tid = em.get("gmail_thread_id")
-                        
-                        # 1. DISCOVERY: If we don't have a thread ID, try to find it
-                        if not tid:
-                            tid, _ = await find_thread_info(token, em["recipient"], em["subject"])
-                            if tid:
-                                await db.tracked_emails.update_one({"id": em["id"]}, {"$set": {"gmail_thread_id": tid}})
-                                logging.info(f"Auto-Discovery: Linked thread {tid} for email {em['id']}")
 
-                        # 2. SCAN: If we have a thread ID, check for replies
-                        if tid:
+                for em in pending:
+                    token = await ensure_google_token(em["user_id"])
+                    if not token: continue
+                    user = await db.users.find_one({"user_id": em["user_id"]})
+                    my_email = user.get("email", "").lower() if user else ""
+                    
+                    tid = em.get("gmail_thread_id")
+                    if not tid:
+                        tid, _ = await find_thread_info(token, em["recipient"], em["subject"])
+                        if tid: await db.tracked_emails.update_one({"id": em["id"]}, {"$set": {"gmail_thread_id": tid}})
+                    
+                    if tid:
+                        try:
                             thread_url = f"https://gmail.googleapis.com/gmail/v1/users/me/threads/{tid}"
                             r = await client.get(thread_url, headers={"Authorization": f"Bearer {token}"})
                             if r.status_code == 200:
@@ -1531,36 +1518,25 @@ async def check_all_replies():
                                 for m in msgs:
                                     hds = m.get("payload", {}).get("headers", [])
                                     frm = next((h["value"].lower() for h in hds if h["name"].lower() == "from"), "")
-                                    if frm and my_email not in frm:
-                                        found_reply = True
-                                        break
+                                    if frm and my_email and my_email not in frm:
+                                        found_reply = True; break
                                 
                                 if found_reply:
                                     ts = datetime.now(timezone.utc).isoformat()
-                                    await db.tracked_emails.update_one(
-                                        {"id": em["id"]}, 
-                                        {"$set": {"replied": True, "replied_at": ts, "last_activity_at": ts}}
-                                    )
-                                    # Kill any pending auto follow-ups
+                                    await db.tracked_emails.update_one({"id": em["id"]}, {"$set": {"replied": True, "replied_at": ts, "last_activity_at": ts}})
                                     await db.follow_ups.delete_many({"tracked_email_id": em["id"], "sent": False})
-                                    logging.info(f"Background Alert: Lead {em['recipient']} reply detected! Promoted to Active.")
-                                    
-                                    push_event(uid, {
-                                        "type": "reply",
-                                        "tracked_id": em["id"],
-                                        "recipient": em["recipient"],
-                                        "subject": em["subject"],
-                                        "ts": ts
-                                    })
-            
-            # Run very frequently (every 5s) as requested for instant detection
-            await asyncio.sleep(5) 
-        except Exception as e:
-            logging.error(f"Reply checker error: {e}")
-            await asyncio.sleep(10)
+                                    push_event(em["user_id"], {"type": "reply", "tracked_id": em["id"]})
+                        except Exception: pass
+                    await asyncio.sleep(1.5)
+                await asyncio.sleep(60)
+            except Exception as e:
+                logging.error(f"Reply worker error: {e}")
+                await asyncio.sleep(60)
 
+            
 @app.on_event("startup")
 async def startup_event():
+
     # MIGRATION: Ensure all emails have last_activity_at for consistent sorting
     # We find all documents where last_activity_at is missing and set it to sent_at
     cursor = db.tracked_emails.find({"last_activity_at": {"$exists": False}})
