@@ -571,9 +571,14 @@ async def extension_assisted_open(tid: str, request: Request, user: dict = Depen
         }
     )
     
-    # Push notification ONLY once per email
+    # Push notification for every open, with a 10-second debounce
     last_notified = em.get("last_notified_at")
-    should_notify = not bool(last_notified)
+    should_notify = True
+    if last_notified:
+        last_dt = datetime.fromisoformat(last_notified)
+        if last_dt.tzinfo is None: last_dt = last_dt.replace(tzinfo=timezone.utc)
+        if (now - last_dt).total_seconds() < 10:
+            should_notify = False
             
     if should_notify:
         await db.tracked_emails.update_one({"id": tid}, {"$set": {"last_notified_at": ts}})
@@ -700,9 +705,14 @@ async def track_pixel(tid: str, request: Request):
             "$set": {"last_opened_at": ts},
             "$push": {"opens": {"ts": ts, "ua": ua, "ip": ip}}
         })
-        # Push notification ONLY once per email
+        # Push notification for every open, with a 10-second debounce
         last_notified = em.get("last_notified_at")
-        should_notify = not bool(last_notified)
+        should_notify = True
+        now_dt = datetime.now(timezone.utc)
+        if last_notified:
+            ln_dt = datetime.fromisoformat(last_notified)
+            if (now_dt - ln_dt.replace(tzinfo=timezone.utc)).total_seconds() < 10:
+                should_notify = False
 
         if should_notify:
             await db.tracked_emails.update_one({"id": original_tid}, {"$set": {"last_notified_at": ts}})
