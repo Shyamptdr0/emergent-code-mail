@@ -192,6 +192,7 @@
             // that doesn't belong to the current tracking ID.
             const isTracker = src.includes("mail-tracker-with-new") || 
                               src.includes("api/track/pixel") || 
+                              src.includes("api%2Ftrack%2Fpixel") ||
                               img.hasAttribute("data-mt-pixel") ||
                               style.includes("left:-9999px") ||
                               (img.getAttribute("width") === "1" && img.getAttribute("height") === "1") ||

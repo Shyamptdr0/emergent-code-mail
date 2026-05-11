@@ -11,16 +11,13 @@ export default function Login() {
   const navigate = useNavigate();
 
   const login = useGoogleLogin({
+    flow: "auth-code",
     scope: "https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.insert https://www.googleapis.com/auth/gmail.settings.basic https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.labels https://www.googleapis.com/auth/gmail.addons.current.action.compose https://www.googleapis.com/auth/gmail.addons.current.message.readonly",
     prompt: "consent",
-    onSuccess: async (tokenResponse) => {
+    onSuccess: async (codeResponse) => {
       try {
-        const res = await axios.get("https://www.googleapis.com/oauth2/v3/userinfo", {
-          headers: { Authorization: `Bearer ${tokenResponse.access_token}` },
-        });
         const { data } = await api.post("/auth/google-native", {
-          ...res.data,
-          access_token: tokenResponse.access_token
+          code: codeResponse.code
         });
         setUser(data);
         navigate("/dashboard", { replace: true, state: { user: data } });

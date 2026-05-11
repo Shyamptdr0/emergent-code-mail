@@ -195,28 +195,65 @@ class GoogleNativeAuth(BaseModel):
 
 @api_router.post("/auth/google-native")
 async def auth_google_native(payload: dict, response: Response):
-    email = payload.get("email")
-    name = payload.get("name") or email
-    picture = payload.get("picture")
-    access_token = payload.get("access_token")
+    code = payload.get("code")
+    if not code:
+        raise HTTPException(status_code=400, detail="Authorization code is required")
+
+    client_id = os.environ.get("GOOGLE_CLIENT_ID")
+    client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
+    
+    if not client_id or not client_secret:
+        raise HTTPException(status_code=500, detail="Google OAuth credentials not configured")
+
+    # Exchange code for tokens
+    async with httpx.AsyncClient() as client:
+        token_res = await client.post("https://oauth2.googleapis.com/token", data={
+            "code": code,
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "redirect_uri": "postmessage",
+            "grant_type": "authorization_code"
+        })
+        if token_res.status_code != 200:
+            raise HTTPException(status_code=401, detail=f"Failed to exchange token: {token_res.text}")
+            
+        token_data = token_res.json()
+        access_token = token_data.get("access_token")
+        refresh_token = token_data.get("refresh_token")
+
+        # Fetch user info
+        user_res = await client.get("https://www.googleapis.com/oauth2/v3/userinfo", headers={
+            "Authorization": f"Bearer {access_token}"
+        })
+        if user_res.status_code != 200:
+            raise HTTPException(status_code=401, detail="Failed to fetch user info")
+            
+        user_info = user_res.json()
+        email = user_info.get("email")
+        name = user_info.get("name") or email
+        picture = user_info.get("picture")
 
     existing = await db.users.find_one({"email": email}, {"_id": 0})
     if existing:
         user_id = existing["user_id"]
         ext_api_key = existing.get("ext_api_key") or secrets.token_urlsafe(24)
+        update_data = {
+            "name": name, 
+            "picture": picture, 
+            "ext_api_key": ext_api_key,
+            "access_token": access_token
+        }
+        if refresh_token:
+            update_data["refresh_token"] = refresh_token
+            
         await db.users.update_one(
             {"user_id": user_id},
-            {"$set": {
-                "name": name, 
-                "picture": picture, 
-                "ext_api_key": ext_api_key,
-                "access_token": access_token
-            }},
+            {"$set": update_data},
         )
     else:
         user_id = f"user_{uuid.uuid4().hex[:12]}"
         ext_api_key = secrets.token_urlsafe(24)
-        await db.users.insert_one({
+        new_user = {
             "user_id": user_id,
             "email": email,
             "name": name,
@@ -224,7 +261,10 @@ async def auth_google_native(payload: dict, response: Response):
             "ext_api_key": ext_api_key,
             "access_token": access_token,
             "created_at": datetime.now(timezone.utc).isoformat(),
-        })
+        }
+        if refresh_token:
+            new_user["refresh_token"] = refresh_token
+        await db.users.insert_one(new_user)
 
     session_token = secrets.token_urlsafe(32)
     expires_at = datetime.now(timezone.utc) + timedelta(days=7)
