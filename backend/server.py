@@ -1392,95 +1392,99 @@ async def send_gmail_message(access_token: str, recipient: str, subject: str, bo
 
 async def automation_worker():
     """Background task that sends due 'auto' follow-ups via Gmail API."""
-    while True:
-        try:
-            # 1. Fetch due follow-ups that are in 'auto' mode and not yet sent
-            now_iso = datetime.now(timezone.utc).isoformat()
-            dues = await db.follow_ups.find({
-                "sent": False,
-                "mode": "auto",
-                "scheduled_at": {"$lte": now_iso}
-            }).to_list(50)
-            
-            for f in dues:
-                uid = f["user_id"]
-                token = await ensure_google_token(uid)
-                if not token:
+    logging.info("Automation worker started.")
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        while True:
+            try:
+                now_iso = datetime.now(timezone.utc).isoformat()
+                dues = await db.follow_ups.find({
+                    "sent": False,
+                    "mode": "auto",
+                    "scheduled_at": {"$lte": now_iso}
+                }).sort("scheduled_at", 1).to_list(10)
+                
+                if not dues:
+                    await asyncio.sleep(60)
                     continue
-                
-                user = await db.users.find_one({"user_id": uid})
-                my_email = user["email"].lower()
-                
-                # 2. Check conditions (if_not_opened, etc.)
-                em = await db.tracked_emails.find_one({"id": f["tracked_email_id"]})
-                if not em: continue
-                
-                # 2. PROACTIVE REPLY CHECK
-                is_replied = em.get("replied", False)
-                if not is_replied and em.get("gmail_thread_id"):
-                    async with httpx.AsyncClient() as client:
-                        thread_url = f"https://gmail.googleapis.com/gmail/v1/users/me/threads/{em['gmail_thread_id']}"
-                        r = await client.get(thread_url, headers={"Authorization": f"Bearer {token}"})
-                        if r.status_code == 200:
-                            msgs = r.json().get("messages", [])
-                            for m in msgs:
-                                hds = m.get("payload", {}).get("headers", [])
-                                frm = next((h["value"].lower() for h in hds if h["name"].lower() == "from"), "")
-                                if frm and my_email not in frm:
-                                    # FOUND A REPLY!
-                                    await db.tracked_emails.update_one({"id": em["id"]}, {"$set": {"replied": True}})
-                                    await db.follow_ups.delete_many({"tracked_email_id": em["id"], "sent": False})
-                                    is_replied = True
-                                    logging.info(f"Proactive detection: Lead {em['recipient']} replied to {em['id']}. Automation stopped.")
-                                    break
 
-                cond = f.get("trigger_condition", "always")
-                is_opened = em.get("open_count", 0) > 0
-                
-                should_send = False
-                if cond == "always": 
-                    should_send = True
-                elif cond == "if_not_opened" or cond == "if_no_open": 
-                    should_send = not is_opened
-                elif cond == "if_not_replied" or cond == "if_no_reply": 
-                    should_send = not is_replied
-                elif cond == "if_opened_no_reply" or cond == "if_opened_no_reply":
-                    should_send = is_opened and not is_replied
-                
-                if is_replied: should_send = False
-                
-                if should_send:
-                    # 3. Inject tracking pixel
-                    thread_id, parent_msg_id = await find_thread_info(token, em["recipient"], em["subject"])
+                for f in dues:
+                    token = await ensure_google_token(f["user_id"])
+                    if not token: continue
                     
-                    backend_url = os.environ.get("BACKEND_URL", "http://localhost:8001").rstrip("/")
-                    pixel_url = f"{backend_url}/api/track/pixel/{f['id']}.png"
-                    pixel_html = f'<img src="{pixel_url}" width="1" height="1" style="display:none;" />'
-                    full_body = f"{f['message']}<br/><br/>{pixel_html}"
+                    user = await db.users.find_one({"user_id": f["user_id"]})
+                    my_email = user.get("email", "").lower() if user else ""
                     
-                    success = await send_gmail_message(
-                        token, 
-                        f["recipient"], 
-                        f["subject"], 
-                        full_body,
-                        thread_id=thread_id,
-                        parent_msg_id=parent_msg_id
-                    )
-                    if success:
-                        # 4. Mark as sent
-                        await db.follow_ups.update_one(
-                            {"id": f["id"]},
-                            {"$set": {"sent": True, "sent_at": datetime.now(timezone.utc).isoformat()}}
+                    em = await db.tracked_emails.find_one({"id": f["tracked_email_id"]})
+                    if not em: continue
+                
+                    is_replied = em.get("replied", False)
+                    if not is_replied and em.get("gmail_thread_id"):
+                        try:
+                            thread_url = f"https://gmail.googleapis.com/gmail/v1/users/me/threads/{em['gmail_thread_id']}"
+                            r = await client.get(thread_url, headers={"Authorization": f"Bearer {token}"})
+                            if r.status_code == 200:
+                                msgs = r.json().get("messages", [])
+                                for m in msgs:
+                                    hds = m.get("payload", {}).get("headers", [])
+                                    frm = next((h["value"].lower() for h in hds if h["name"].lower() == "from"), "")
+                                    if frm and my_email and my_email not in frm:
+                                        await db.tracked_emails.update_one({"id": em["id"]}, {"$set": {"replied": True}})
+                                        await db.follow_ups.delete_many({"tracked_email_id": em["id"], "sent": False})
+                                        is_replied = True
+                                        logging.info(f"Detected reply for {em['id']}. Stopped.")
+                                        break
+                        except Exception: pass
+
+                    cond = f.get("trigger_condition", "always")
+
+                    is_opened = em.get("open_count", 0) > 0
+                    
+                    should_send = False
+                    if cond == "always": 
+                        should_send = True
+                    elif cond == "if_not_opened" or cond == "if_no_open": 
+                        should_send = not is_opened
+                    elif cond == "if_not_replied" or cond == "if_no_reply": 
+                        should_send = not is_replied
+                    elif cond == "if_opened_no_reply" or cond == "if_opened_no_reply":
+                        should_send = is_opened and not is_replied
+                    
+                    if is_replied: should_send = False
+                    
+                    if should_send:
+                        # 3. Inject tracking pixel
+                        thread_id, parent_msg_id = await find_thread_info(token, em["recipient"], em["subject"])
+                        
+                        backend_url = os.environ.get("BACKEND_URL", "http://localhost:8001").rstrip("/")
+                        pixel_url = f"{backend_url}/api/track/pixel/{f['id']}.png"
+                        pixel_html = f'<img src="{pixel_url}" width="1" height="1" style="display:none;" />'
+                        full_body = f"{f['message']}<br/><br/>{pixel_html}"
+                        
+                        success = await send_gmail_message(
+                            token, 
+                            em["recipient"], 
+                            em["subject"], 
+                            full_body,
+                            thread_id=thread_id,
+                            parent_msg_id=parent_msg_id
                         )
-                        await db.tracked_emails.update_one(
-                            {"id": em["id"]},
-                            {"$inc": {"follow_up_count": 1}}
-                        )
-                        logging.info(f"Auto follow-up sent to {f['recipient']} for {em['id']}")
-        except Exception as e:
-            logging.error(f"Automation worker error: {e}")
-            
-        await asyncio.sleep(10) # Run every 10 seconds for automation
+                        if success:
+                            # 4. Mark as sent
+                            await db.follow_ups.update_one(
+                                {"id": f["id"]},
+                                {"$set": {"sent": True, "sent_at": datetime.now(timezone.utc).isoformat()}}
+                            )
+                            await db.tracked_emails.update_one(
+                                {"id": em["id"]},
+                                {"$inc": {"follow_up_count": 1}}
+                            )
+                            logging.info(f"Auto follow-up sent to {f['recipient']} for {em['id']}")
+
+            except Exception as e:
+                logging.error(f"Automation worker error: {e}")
+                
+            await asyncio.sleep(10) # Run every 10 seconds for automation
+
 
 async def check_all_replies():
     """Background task to scan ALL pending emails for replies with 5-10s responsiveness."""
