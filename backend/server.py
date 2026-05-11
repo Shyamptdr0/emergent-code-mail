@@ -42,21 +42,26 @@ db = client[os.environ['DB_NAME']]
 app = FastAPI()
 
 # --- CORS CONFIGURATION ---
-# Robust origin parsing (handles spaces and trailing slashes)
-# Robust origin parsing from .env (handles spaces and trailing slashes)
+# Robust origin parsing (handles spaces, newlines, and trailing slashes)
 raw_origins = os.environ.get("CORS_ORIGINS", "")
-cors_origins = [o.strip().rstrip("/") for o in raw_origins.split(",") if o.strip()]
+cors_origins = [o.strip().rstrip("/") for o in raw_origins.replace("\n", ",").split(",") if o.strip()]
 
+# DEBUG: Print origins in Render logs to verify
+print(f"CORS Origins: {cors_origins}")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["Authorization", "Content-Type", "X-Ext-Key", "Accept", "Origin"],
+    allow_headers=["*"],
+    max_age=600, # Cache preflight results for 10 minutes
 )
 
-
+# Explicit OPTIONS handler to prevent 400 on Preflight
+@app.options("/api/auth/google-native")
+async def options_google_native():
+    return Response(status_code=200)
 
 async def get_user_by_ext_key(request: Request) -> dict:
     x_ext_key = request.headers.get("X-Ext-Key") or request.query_params.get("key")
