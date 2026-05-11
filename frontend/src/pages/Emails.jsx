@@ -66,7 +66,25 @@ export default function Emails() {
     }
   };
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { 
+    load(); 
+    
+    // SSE for real-time updates
+    const token = localStorage.getItem("token");
+    if (!token) return;
+    
+    const backendUrl = import.meta.env.VITE_API_URL || "";
+    const es = new EventSource(`${backendUrl}/api/events/stream?token=${token}`);
+    
+    es.onmessage = (e) => {
+      const data = JSON.parse(e.data);
+      if (data.type === "open" || data.type === "reply") {
+        load(); // Reload data on open/reply
+      }
+    };
+    
+    return () => es.close();
+  }, []);
 
   const filtered = rows.filter(
     (r) =>
@@ -141,31 +159,32 @@ export default function Emails() {
                   <td className="px-4 py-3">
                     {e.replied ? (
                       <div className="flex flex-col">
-                        <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest bg-emerald-50 px-2 py-1 rounded w-fit">Replied</span>
-                        <span className="text-[9px] text-slate-400 font-bold mt-1">Sequence Stopped</span>
+                        <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest bg-emerald-50 px-2 py-1 rounded w-fit border border-emerald-100">Replied</span>
+                        <span className="text-[9px] text-slate-400 font-bold mt-1">Campaign Stopped</span>
                       </div>
                     ) : e.next_followup ? (
                       <div className="flex flex-col group">
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-sm font-black text-slate-900 group-hover:text-amber-600 transition-colors">{e.next_followup.label}</span>
-                          {(e.next_followup.condition === "if_no_open" || e.next_followup.condition === "if_opened_no_reply") && e.open_count === 0 ? (
-                            <div className="flex items-center gap-1 bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded text-[8px] font-bold uppercase border border-slate-200">
-                              <div className="w-1.5 h-1.5 rounded-full bg-slate-300 animate-pulse" />
-                              Waiting for Open
-                            </div>
-                          ) : (
-                            <div className="flex items-center gap-1 bg-amber-50 text-amber-600 px-1.5 py-0.5 rounded text-[8px] font-bold uppercase border border-amber-100">
-                              <Zap className="w-2.5 h-2.5 fill-amber-500" />
-                              Active
-                            </div>
-                          )}
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className="text-sm font-black text-slate-900">{e.next_followup.label}</span>
+                          <div className={`px-1.5 py-0.5 rounded text-[8px] font-bold uppercase border ${
+                            (e.next_followup.condition === "if_no_open" || e.next_followup.condition === "if_opened_no_reply") && e.open_count === 0 
+                            ? "bg-slate-100 text-slate-500 border-slate-200" 
+                            : "bg-amber-50 text-amber-600 border-amber-100"
+                          }`}>
+                            {e.next_followup.condition.replace("if_", "").replace(/_/g, " ")}
+                          </div>
                         </div>
-                        <span className="text-[10px] text-slate-500 font-bold uppercase tracking-tighter mt-0.5">
-                          {formatRemaining(e.next_followup.scheduled_at)}
-                        </span>
+                        <div className="flex items-center gap-1.5 text-slate-500">
+                          <Clock className="w-3 h-3" />
+                          <span className="text-[10px] font-bold uppercase tracking-tighter">
+                            {formatRemaining(e.next_followup.scheduled_at)}
+                          </span>
+                        </div>
                       </div>
                     ) : (
-                      <span className="text-[10px] text-slate-300 font-bold uppercase tracking-widest opacity-50 italic">No Active Sequence</span>
+                      <div className="flex flex-col opacity-30">
+                         <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest italic">No Active Sequence</span>
+                      </div>
                     )}
                   </td>
                   <td className="px-4 py-3 text-xs text-slate-500">

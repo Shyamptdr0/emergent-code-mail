@@ -159,11 +159,8 @@ export default function Automation() {
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
-                            <SelectItem value="no_reply">No Reply</SelectItem>
-                            <SelectItem value="no_open">No Open</SelectItem>
-                            <SelectItem value="no_click">No Click</SelectItem>
-                            <SelectItem value="no_reply_or_click">No Reply or Click</SelectItem>
-                            <SelectItem value="everyone">Everyone</SelectItem>
+                            <SelectItem value="no_open">Not Open</SelectItem>
+                            <SelectItem value="opened_no_reply">Open but No Reply</SelectItem>
                           </SelectContent>
                         </Select>
                       </div>

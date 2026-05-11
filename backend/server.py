@@ -800,14 +800,33 @@ async def list_emails(user: dict = Depends(get_current_user)):
             
     for r in rows:
         tid = r["id"]
+        is_opened = r.get("open_count", 0) > 0
         sent_count = sent_map.get(tid, 0)
-        p = pending_map.get(tid)
-        if p:
+        
+        # Filter pending follow-ups that match the current state
+        pending_for_tid = [p for p in all_pending if p["tracked_email_id"] == tid]
+        
+        relevant_p = None
+        for p in pending_for_tid:
+            cond = p.get("trigger_condition", "")
+            # If not opened, we care about 'if_no_open' or 'always' (default)
+            if not is_opened:
+                if cond in ["if_no_open", "if_not_opened", "always", "if_no_reply"]:
+                    relevant_p = p
+                    break
+            else:
+                # If opened, we care about 'if_opened_no_reply' or 'always'
+                if cond in ["if_opened_no_reply", "always", "if_no_reply"]:
+                    relevant_p = p
+                    break
+                    
+        if relevant_p:
             nth = sent_count + 1
             suffix = "st" if nth == 1 else "nd" if nth == 2 else "rd" if nth == 3 else "th"
             r["next_followup"] = {
-                "label": f"{nth}{suffix}",
-                "scheduled_at": p["scheduled_at"]
+                "label": f"{nth}{suffix} Follow-up",
+                "scheduled_at": relevant_p["scheduled_at"],
+                "condition": relevant_p.get("trigger_condition", "")
             }
         else:
             r["next_followup"] = None
@@ -1378,11 +1397,11 @@ async def automation_worker():
                 should_send = False
                 if cond == "always": 
                     should_send = True
-                elif cond == "if_not_opened": 
+                elif cond == "if_not_opened" or cond == "if_no_open": 
                     should_send = not is_opened
-                elif cond == "if_not_replied": 
+                elif cond == "if_not_replied" or cond == "if_no_reply": 
                     should_send = not is_replied
-                elif cond == "if_opened_no_reply":
+                elif cond == "if_opened_no_reply" or cond == "if_opened_no_reply":
                     should_send = is_opened and not is_replied
                 
                 if is_replied: should_send = False
