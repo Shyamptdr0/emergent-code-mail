@@ -52,11 +52,13 @@ print(f"CORS Origins: {cors_origins}")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
+    allow_origin_regex=r"chrome-extension://.*|moz-extension://.*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    max_age=600, # Cache preflight results for 10 minutes
+    max_age=600,
 )
+
 
 # Explicit OPTIONS handler to prevent 400 on Preflight
 @app.options("/api/auth/google-native")
