@@ -309,7 +309,8 @@ async def auth_google_native(payload: dict, response: Response):
         await db.users.insert_one(new_user)
 
     session_token = secrets.token_urlsafe(32)
-    expires_at = datetime.now(timezone.utc) + timedelta(days=7)
+    # Long-lived session (1 year) for persistence
+    expires_at = datetime.now(timezone.utc) + timedelta(days=365)
     await db.user_sessions.insert_one({
         "user_id": user_id,
         "session_token": session_token,
@@ -320,14 +321,16 @@ async def auth_google_native(payload: dict, response: Response):
     # On localhost (HTTP) secure=True blocks the cookie. Detect environment.
     # Better way to detect if we are on Render production vs Localhost
     is_production = os.environ.get("RENDER") is not None or "localhost" not in os.environ.get("BACKEND_URL", "localhost")
-
+    
     response.set_cookie(
         "session_token", session_token,
         httponly=True,
         secure=is_production,
         samesite="none" if is_production else "lax",
-        max_age=7 * 24 * 60 * 60, path="/",
+        max_age=365 * 24 * 60 * 60, # 1 year in seconds
+        path="/",
     )
+
     return {
         "user_id": user_id, "email": email, "name": name,
         "picture": picture, "ext_api_key": ext_api_key,
