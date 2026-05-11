@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { Link } from "react-router-dom";
 import { MessageCircle, CheckCircle2, ArrowUpRight } from "lucide-react";
 import { api } from "../lib/api";
@@ -14,7 +14,7 @@ export default function ActiveMails() {
   const [page, setPage] = useState(1);
   const LIMIT = 15;
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true);
     try {
       const res = await api.get(`/emails/active?page=${page}&limit=${LIMIT}`);
@@ -24,9 +24,9 @@ export default function ActiveMails() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [page]);
 
-  useEffect(() => { load(); }, [page]);
+  useEffect(() => { load(); }, [load]);
 
   const rows = data.items;
   const totalPages = data.pages;
