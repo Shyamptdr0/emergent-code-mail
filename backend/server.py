@@ -1636,7 +1636,8 @@ app.add_middleware(
     allow_headers=["*", "Authorization", "Content-Type", "X-Ext-Key"],
 )
 
-app.include_router(api_router)
+app.include_router(api_router, prefix="/api")
+
 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
