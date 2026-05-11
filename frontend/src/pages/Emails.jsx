@@ -172,6 +172,7 @@ export default function Emails() {
                             : "bg-amber-50 text-amber-600 border-amber-100"
                           }`}>
                             {e.next_followup.condition.replace("if_", "").replace(/_/g, " ")}
+                            {(e.next_followup.condition === "if_no_open" || e.next_followup.condition === "if_opened_no_reply") && e.open_count === 0 && " (Waiting)"}
                           </div>
                         </div>
                         <div className="flex items-center gap-1.5 text-slate-500">
@@ -182,8 +183,22 @@ export default function Emails() {
                         </div>
                       </div>
                     ) : (
-                      <div className="flex flex-col opacity-30">
-                         <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest italic">No Active Sequence</span>
+                      <div className="flex flex-col gap-1">
+                         <span className="text-[10px] text-slate-300 font-bold uppercase tracking-widest italic opacity-50">No Active Sequence</span>
+                         <button 
+                            onClick={async () => {
+                                try {
+                                    await api.post(`/track/update/${e.id}`, {}); 
+                                    toast.success("Automation Started");
+                                    load();
+                                } catch(err) {
+                                    toast.error("Failed to start automation");
+                                }
+                            }}
+                            className="text-[9px] font-bold text-slate-900 bg-white border border-slate-200 px-2 py-1 rounded hover:bg-slate-50 transition-colors w-fit flex items-center gap-1 shadow-sm"
+                         >
+                            <Zap className="w-2.5 h-2.5 fill-amber-500 text-amber-500" /> Start Campaign
+                         </button>
                       </div>
                     )}
                   </td>

@@ -366,37 +366,51 @@ async def update_tracked(tid: str, payload: TrackUpdate, user: dict = Depends(ge
             {"id": tid, "user_id": user["user_id"]},
             {"$set": updates},
         )
+        logging.info(f"Email {tid} updated to 'sent' status. Checking for automation...")
         
         # Apply Automation Sequences
         # Avoid duplicate scheduling if follow-ups already exist for this TID
-        existing_scheduled = await db.follow_ups.count_documents({"tracked_email_id": tid, "sent": False})
-        if existing_scheduled > 0:
+        existing_count = await db.follow_ups.count_documents({"tracked_email_id": tid})
+        if existing_count > 0:
+            logging.info(f"Automation already exists for {tid}. Skipping.")
             return {"ok": True}
 
-        rules = await db.automation_rules.find({"user_id": user["user_id"]}).to_list(100)
-        sent_at = datetime.now(timezone.utc)
-        
-        # Check if any follow-ups were already sent (e.g. manual or test)
-        # to skip those stages in the sequence
-        sent_count = await db.follow_ups.count_documents({"tracked_email_id": tid, "sent": True})
+        # Find any active automation rules for this user
+        rules = await db.automation_rules.find({"user_id": user["user_id"]}).to_list(10)
+        if not rules:
+            logging.warning(f"No automation rules found for user {user['user_id']}. Cannot schedule follow-ups.")
+            return {"ok": True}
 
-        for rule in rules:
-            for idx, stage in enumerate(rule["stages"]):
-                if idx < sent_count:
-                    continue # Skip stages that have already been fulfilled
-                
-                # Calculate scheduled time using the weekend-aware logic
-                scheduled = get_next_business_time(sent_at, stage["days"], target_hour=int(stage["time"].split(":")[0]))
-                
-                await _create_fup(
-                    tid, 
-                    stage["message"], 
-                    stage["days"], 
-                    "auto", 
-                    f"if_{stage['trigger']}", 
-                    user["user_id"],
-                    custom_scheduled_at=scheduled
-                )
+        sent_at_dt = datetime.now(timezone.utc)
+        
+        # Apply the first rule found (usually only one active campaign)
+        rule = rules[0]
+        logging.info(f"Applying campaign '{rule.get('name')}' to email {tid}")
+        
+        for idx, stage in enumerate(rule["stages"]):
+            trigger = stage.get("trigger", "no_reply")
+            # Normalize trigger labels
+            if trigger == "no_open": cond = "if_no_open"
+            elif trigger == "opened_no_reply": cond = "if_opened_no_reply"
+            else: cond = f"if_{trigger}"
+            
+            # Use business time logic if hours are provided, else simple days
+            try:
+                hour = int(stage.get("time", "10:00").split(":")[0])
+                scheduled = get_next_business_time(sent_at_dt, stage["days"], target_hour=hour)
+            except Exception:
+                scheduled = sent_at_dt + timedelta(days=stage["days"])
+
+            await _create_fup(
+                tid, 
+                stage["message"], 
+                stage["days"], 
+                "auto", 
+                cond, 
+                user["user_id"],
+                custom_scheduled_at=scheduled
+            )
+            logging.info(f"Scheduled Stage {idx+1} ({cond}) for {tid} at {scheduled.isoformat()}")
 
     return {"ok": True}
 
@@ -800,25 +814,10 @@ async def list_emails(user: dict = Depends(get_current_user)):
             
     for r in rows:
         tid = r["id"]
-        is_opened = r.get("open_count", 0) > 0
         sent_count = sent_map.get(tid, 0)
         
-        # Filter pending follow-ups that match the current state
-        pending_for_tid = [p for p in all_pending if p["tracked_email_id"] == tid]
-        
-        relevant_p = None
-        for p in pending_for_tid:
-            cond = p.get("trigger_condition", "")
-            # If not opened, we care about 'if_no_open' or 'always' (default)
-            if not is_opened:
-                if cond in ["if_no_open", "if_not_opened", "always", "if_no_reply"]:
-                    relevant_p = p
-                    break
-            else:
-                # If opened, we care about 'if_opened_no_reply' or 'always'
-                if cond in ["if_opened_no_reply", "always", "if_no_reply"]:
-                    relevant_p = p
-                    break
+        # Just pick the earliest pending follow-up for this thread
+        relevant_p = next((p for p in all_pending if p["tracked_email_id"] == tid), None)
                     
         if relevant_p:
             nth = sent_count + 1
