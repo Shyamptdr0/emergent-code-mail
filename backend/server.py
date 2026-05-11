@@ -41,6 +41,25 @@ db = client[os.environ['DB_NAME']]
 
 app = FastAPI()
 
+# --- CORS CONFIGURATION ---
+# Load origins from .env (separated by comma)
+raw_origins = os.environ.get("CORS_ORIGINS", "")
+cors_origins = [o.strip() for o in raw_origins.split(",") if o.strip()]
+
+# Fallback to localhost if nothing is provided (for safety during development)
+if not cors_origins:
+    cors_origins = ["http://localhost:3000", "http://localhost:3001"]
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
 async def get_user_by_ext_key(request: Request) -> dict:
     x_ext_key = request.headers.get("X-Ext-Key") or request.query_params.get("key")
     if not x_ext_key:
@@ -66,7 +85,9 @@ async def get_user_any_auth(request: Request) -> dict:
     except Exception:
         raise HTTPException(status_code=401, detail="Authentication failed")
 
-api_router = APIRouter(prefix="/api")
+# No prefix here because it's added during include_router at the bottom
+api_router = APIRouter()
+
 
 @api_router.get("/ext-profile")
 async def ext_profile(user: dict = Depends(get_user_by_ext_key)):
@@ -292,7 +313,9 @@ async def auth_google_native(payload: dict, response: Response):
     })
 
     # On localhost (HTTP) secure=True blocks the cookie. Detect environment.
-    is_production = "localhost" not in os.environ.get("BACKEND_URL", "localhost")
+    # Better way to detect if we are on Render production vs Localhost
+    is_production = os.environ.get("RENDER") is not None or "localhost" not in os.environ.get("BACKEND_URL", "localhost")
+
     response.set_cookie(
         "session_token", session_token,
         httponly=True,
@@ -1632,15 +1655,10 @@ async def download_extension():
         headers={"Content-Disposition": 'attachment; filename="mailtrack-extension.zip"'},
     )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=[o.strip().strip('"').strip("'") for o in os.environ.get('CORS_ORIGINS', '').split(',') if o.strip()],
-    allow_methods=["*"],
-    allow_headers=["*", "Authorization", "Content-Type", "X-Ext-Key"],
-)
-
+# Single source of truth for CORS (Consolidated at the top)
+# Router inclusion
 app.include_router(api_router, prefix="/api")
+
 
 
 
