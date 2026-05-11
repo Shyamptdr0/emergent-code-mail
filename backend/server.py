@@ -494,6 +494,10 @@ async def extension_assisted_open(tid: str, request: Request, user: dict = Depen
     if not em:
         return {"ok": False}
         
+    # If the user making this request is the sender of the email, DO NOT count it!
+    if em.get("user_id") == user.get("user_id"):
+        return {"ok": "self_viewing_sender"}
+        
     now = datetime.now(timezone.utc)
     # Debounce 1 second to prevent double-counting with the initial GIP proxy hit
     last_opened = em.get("last_opened_at")

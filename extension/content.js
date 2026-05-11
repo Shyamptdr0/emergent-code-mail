@@ -194,9 +194,10 @@
                               src.includes("api/track/pixel") || 
                               img.hasAttribute("data-mt-pixel") ||
                               style.includes("left:-9999px") ||
-                              (img.getAttribute("width") === "1" && img.getAttribute("height") === "1");
+                              (img.getAttribute("width") === "1" && img.getAttribute("height") === "1") ||
+                              (img.getAttribute("alt") || "").startsWith("mt-");
             
-            if (isTracker && img.getAttribute("data-mt-pixel") !== info.tid) {
+            if (isTracker && img.getAttribute("data-mt-pixel") !== info.tid && img.getAttribute("alt") !== `mt-${info.tid}`) {
               const wrap = img.closest('.mt-wrapper');
               if (wrap) wrap.remove();
               else img.remove();
@@ -204,8 +205,8 @@
           });
 
           // 2. Ensure our correct pixel is present
-          if (!body.querySelector(`img[data-mt-pixel="${info.tid}"]`)) {
-            const pixelHtml = `<img src="${info.pixel_url}" width="1" height="1" data-mt-pixel="${info.tid}" style="display:block;width:1px;height:1px;opacity:0;border:0;position:absolute;left:-9999px;" alt="" />`;
+          if (!body.querySelector(`img[data-mt-pixel="${info.tid}"], img[alt="mt-${info.tid}"]`)) {
+            const pixelHtml = `<img src="${info.pixel_url}" width="1" height="1" data-mt-pixel="${info.tid}" alt="mt-${info.tid}" style="display:block;width:1px;height:1px;opacity:0;border:0;position:absolute;left:-9999px;" />`;
             body.insertAdjacentHTML("beforeend", `<div class="mt-wrapper" style="opacity:0;height:0;overflow:hidden;">${pixelHtml}</div>`);
           }
         }
@@ -404,7 +405,8 @@
   const markedViewingAt = {};
   async function markViewing(tid) {
     const now = Date.now();
-    if (markedViewingAt[tid] && now - markedViewingAt[tid] < 30000) return;
+    // Use a 2-second debounce so it constantly refreshes the backend's 4-second shield
+    if (markedViewingAt[tid] && now - markedViewingAt[tid] < 2000) return;
     markedViewingAt[tid] = now;
     try {
       await api(`/api/track/${tid}/mark-viewing`, { method: "POST" });
@@ -417,11 +419,19 @@
   function detectSelfViewing() {
     try {
       // Find all tracking pixels in the currently visible view
-      const trackers = document.querySelectorAll('img[src*="api/track/pixel"], img[data-mt-pixel]');
+      // We look for the 'alt' attribute because Gmail preserves 'alt' even when it completely obfuscates the 'src' URL
+      const trackers = document.querySelectorAll('img[alt^="mt-"], img[data-mt-pixel], img[src*="track/pixel"], img[src*="track%2Fpixel"], .mt-wrapper img');
       trackers.forEach(img => {
         let tid = img.getAttribute("data-mt-pixel");
         if (!tid) {
+          const alt = img.getAttribute("alt") || "";
+          if (alt.startsWith("mt-")) {
+            tid = alt.replace("mt-", "");
+          }
+        }
+        if (!tid) {
           let src = img.src || "";
+          try { src = decodeURIComponent(src); } catch(e) {}
           const match = src.match(/\/api\/track\/pixel\/([^.]+)\.png/);
           if (match) tid = match[1];
         }
