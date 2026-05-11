@@ -50,6 +50,22 @@ async def get_user_by_ext_key(request: Request) -> dict:
         raise HTTPException(status_code=401, detail="Invalid extension key")
     return user
 
+async def get_user_any_auth(request: Request) -> dict:
+    """Attempts session auth first, then falls back to extension key auth."""
+    # Try session auth (Authorization: Bearer <token>)
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        try:
+            return await get_current_user(request)
+        except Exception:
+            pass
+            
+    # Try extension key auth
+    try:
+        return await get_user_by_ext_key(request)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Authentication failed")
+
 api_router = APIRouter(prefix="/api")
 
 @api_router.get("/ext-profile")
@@ -341,6 +357,34 @@ async def create_tracked(payload: TrackCreate, request: Request, user: dict = De
         "follow_up_count": 0,
     }
     await db.tracked_emails.insert_one(doc)
+
+    # --- INSTANT AUTOMATION SCHEDULING ---
+    # We schedule the sequence NOW so the countdown is ready immediately.
+    try:
+        rules = await db.automation_rules.find({"user_id": user["user_id"]}).to_list(1)
+        if rules:
+            rule = rules[0]
+            now_dt = datetime.now(timezone.utc)
+            for stage in rule["stages"]:
+                trigger = stage.get("trigger", "no_reply")
+                if trigger == "no_open": cond = "if_no_open"
+                elif trigger == "opened_no_reply": cond = "if_opened_no_reply"
+                else: cond = f"if_{trigger}"
+                
+                try:
+                    hour = int(stage.get("time", "10:00").split(":")[0])
+                    scheduled = get_next_business_time(now_dt, stage["days"], target_hour=hour)
+                except:
+                    scheduled = now_dt + timedelta(days=stage["days"])
+
+                await _create_fup(
+                    tid, stage["message"], stage["days"], "auto", cond, user["user_id"],
+                    custom_scheduled_at=scheduled
+                )
+            logging.info(f"Instantly scheduled automation for new tracking ID: {tid}")
+    except Exception as e:
+        logging.error(f"Instant schedule failed for {tid}: {e}")
+
     proto = request.headers.get("x-forwarded-proto", request.url.scheme)
     host = request.headers.get("x-forwarded-host") or request.headers.get("host")
     base = f"{proto}://{host}" if host else ""
@@ -355,7 +399,7 @@ class TrackUpdate(BaseModel):
     message_preview: Optional[str] = None
 
 @api_router.post("/track/update/{tid}")
-async def update_tracked(tid: str, payload: TrackUpdate, user: dict = Depends(get_user_by_ext_key)):
+async def update_tracked(tid: str, payload: TrackUpdate, user: dict = Depends(get_user_any_auth)):
     updates = {k: v for k, v in payload.model_dump().items() if v is not None}
     updates["status"] = "sent"
     now = datetime.now(timezone.utc).isoformat()
