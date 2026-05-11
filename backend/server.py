@@ -455,9 +455,20 @@ async def mark_replied(tid: str, user: dict = Depends(get_user_by_ext_key)):
     return {"ok": True, "verified": True}
 
 @api_router.get("/emails/active")
-async def list_active_mails(user: dict = Depends(get_current_user)):
-    """Return only emails that have been replied to."""
-    return await db.tracked_emails.find({"user_id": user["user_id"], "replied": True}, {"_id": 0}).to_list(100)
+async def list_active_mails(page: int = 1, limit: int = 10, user: dict = Depends(get_current_user)):
+    """Return only emails that have been replied to, with pagination."""
+    skip = (page - 1) * limit
+    cursor = db.tracked_emails.find({"user_id": user["user_id"], "replied": True}, {"_id": 0})
+    total = await db.tracked_emails.count_documents({"user_id": user["user_id"], "replied": True})
+    
+    items = await cursor.sort("last_activity_at", -1).skip(skip).limit(limit).to_list(limit)
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "pages": (total + limit - 1) // limit
+    }
 
 @api_router.post("/track/heartbeat-viewing")
 async def heartbeat_viewing(payload: HeartbeatViewing, user: dict = Depends(get_user_by_ext_key)):
