@@ -569,6 +569,14 @@
           });
           // Also update local ticks immediately
           loadEmails().then(renderTicks);
+        } else if (data.type === "reply") {
+          chrome.runtime.sendMessage({
+            type: "SHOW_INSTANT_NOTIFICATION",
+            tracked_id: data.tracked_id,
+            title: "Lead Replied!",
+            message: `From: ${data.recipient}\nSubject: ${data.subject || "(no subject)"}`
+          });
+          loadEmails().then(renderTicks);
         }
       } catch(err) {}
     };
