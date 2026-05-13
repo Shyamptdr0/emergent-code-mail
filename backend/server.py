@@ -18,16 +18,18 @@ import httpx
 
 def get_next_business_time(dt: datetime, days_offset: int, target_hour: Optional[int] = None):
     """Calculates the next scheduled time, skipping weekends.
-    Preserves the exact minutes and seconds from the original time."""
+    On weekdays: preserves exact minutes/seconds unless a target_hour is provided.
+    On weekends: shifts to Monday at exactly 10:00 AM."""
     target = dt + timedelta(days=days_offset)
     
     # 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri, 5=Sat, 6=Sun
     if target.weekday() >= 5: # Saturday or Sunday
         days_to_monday = (7 - target.weekday()) % 7
         target = target + timedelta(days=days_to_monday)
-        # Shift to 10 AM Monday, but keep the original minutes/seconds for precision
-        target = target.replace(hour=10)
+        # Shift to exactly 10 AM Monday
+        target = target.replace(hour=10, minute=0, second=0, microsecond=0)
     elif target_hour is not None:
+        # Override the hour but preserve minutes/seconds
         target = target.replace(hour=target_hour)
     
     return target
@@ -167,6 +169,7 @@ class FollowUp(BaseModel):
     trigger_condition: str = "always"
     open_count: int = 0
     opens: List[Dict[str, Any]] = []
+    time: Optional[str] = None
 
 class AutomationStage(BaseModel):
     trigger: str
@@ -409,14 +412,15 @@ async def create_tracked(payload: TrackCreate, request: Request, user: dict = De
                 else: cond = f"if_{trigger}"
                 
                 try:
-                    hour = int(stage.get("time", "10:00").split(":")[0])
+                    time_val = stage.get("time")
+                    hour = int(time_val.split(":")[0]) if time_val and ":" in time_val else None
                     scheduled = get_next_business_time(now_dt, stage["days"], target_hour=hour)
                 except:
                     scheduled = now_dt + timedelta(days=stage["days"])
 
                 await _create_fup(
                     tid, stage["message"], stage["days"], "auto", cond, user["user_id"],
-                    custom_scheduled_at=scheduled
+                    custom_scheduled_at=scheduled, time=stage.get("time")
                 )
             logging.info(f"Instantly scheduled automation for new tracking ID: {tid}")
     except Exception as e:
@@ -477,9 +481,14 @@ async def update_tracked(tid: str, payload: TrackUpdate, user: dict = Depends(ge
                 {"$set": fup_update}
             )
         
-        existing_count = await db.follow_ups.count_documents({"tracked_email_id": tid})
-        if existing_count > 0:
-            logging.info(f"Automation already exists for {tid}. Updated metadata.")
+        fups = await db.follow_ups.find({"tracked_email_id": tid, "user_id": user["user_id"], "sent": False}).to_list(100)
+        if fups:
+            logging.info(f"Automation already exists for {tid}. Rescheduling for precision...")
+            for f in fups:
+                time_val = f.get("time")
+                hour = int(time_val.split(":")[0]) if time_val and ":" in time_val else None
+                new_sched = get_next_business_time(sent_at_dt, f["days_delay"], target_hour=hour)
+                await db.follow_ups.update_one({"id": f["id"]}, {"$set": {"scheduled_at": new_sched.isoformat()}})
             return {"ok": True}
 
         # Find any active automation rules for this user
@@ -503,20 +512,22 @@ async def update_tracked(tid: str, payload: TrackUpdate, user: dict = Depends(ge
             
             # Use business time logic if hours are provided, else simple days
             try:
-                hour = int(stage.get("time", "10:00").split(":")[0])
+                time_val = stage.get("time")
+                hour = int(time_val.split(":")[0]) if time_val and ":" in time_val else None
                 scheduled = get_next_business_time(sent_at_dt, stage["days"], target_hour=hour)
             except Exception:
                 scheduled = sent_at_dt + timedelta(days=stage["days"])
 
-            await _create_fup(
-                tid, 
-                stage["message"], 
-                stage["days"], 
-                "auto", 
-                cond, 
-                user["user_id"],
-                custom_scheduled_at=scheduled
-            )
+                await _create_fup(
+                    tid, 
+                    stage["message"], 
+                    stage["days"], 
+                    "auto", 
+                    cond, 
+                    user["user_id"],
+                    custom_scheduled_at=scheduled,
+                    time=stage.get("time")
+                )
             logging.info(f"Scheduled Stage {idx+1} ({cond}) for {tid} at {scheduled.isoformat()}")
 
     return {"ok": True}
@@ -567,12 +578,8 @@ async def mark_replied(tid: str, user: dict = Depends(get_user_by_ext_key)):
         {"id": tid, "user_id": user["user_id"]},
         {"$set": {"replied": True}}
     )
-    # Cancel pending follow-ups
-    await db.follow_ups.delete_many({
-        "tracked_email_id": tid,
-        "user_id": user["user_id"],
-        "sent": False
-    })
+    # Stop pending follow-ups
+    await stop_sequences(tid, user["user_id"])
     return {"ok": True, "verified": True}
 
 @api_router.get("/emails/active")
@@ -799,21 +806,19 @@ async def extension_assisted_open(tid: str, request: Request, user: dict = Depen
         else:
             # 3. PROACTIVE FETCH: Scan ALL rules for an 'open' trigger
             rules = await db.automation_rules.find({"user_id": user["user_id"]}).to_list(10)
-            found = False
             for rule in rules:
-                if found: break
-                stage = next((s for s in rule.get("stages", []) if s.get("trigger") in ["opened_no_reply", "no_reply"]), None)
-                if stage:
+                stages = [s for s in rule.get("stages", []) if s.get("trigger") in ["opened_no_reply", "no_reply"]]
+                for stage in stages:
                     sent_at_raw = em.get("sent_at")
                     sent_at = datetime.fromisoformat(sent_at_raw) if isinstance(sent_at_raw, str) else sent_at_raw
                     if sent_at and sent_at.tzinfo is None: sent_at = sent_at.replace(tzinfo=timezone.utc)
                     
                     delay = stage.get("days", 1)
-                    # Use same hour as main mail
-                    new_sched = get_next_business_time(sent_at, delay, target_hour=sent_at.hour)
-                    await _create_fup(tid, stage["message"], delay, "auto", "if_opened_no_reply", user["user_id"], custom_scheduled_at=new_sched)
-                    logging.info(f"Proactively created missing FUP from rule '{rule.get('name')}' relative to sent_at for {tid}")
-                    found = True
+                    time_val = stage.get("time")
+                    hour = int(time_val.split(":")[0]) if time_val and ":" in time_val else sent_at.hour
+                    new_sched = get_next_business_time(sent_at, delay, target_hour=hour)
+                    await _create_fup(tid, stage["message"], delay, "auto", "if_opened_no_reply", user["user_id"], custom_scheduled_at=new_sched, time=time_val)
+                    logging.info(f"Proactively created stage (Day {delay}) from rule '{rule.get('name')}' for {tid}")
     return {"ok": True}
 
 @api_router.get("/emails/{tid}")
@@ -978,9 +983,10 @@ async def track_pixel(tid: str, request: Request):
                 stage = next((s for s in rule.get("stages", []) if s.get("trigger") in ["opened_no_reply", "no_reply"]), None)
                 if stage:
                     delay = stage.get("days", 1)
-                    # Use same hour as main mail
-                    new_sched = get_next_business_time(sent_at, delay, target_hour=sent_at.hour)
-                    await _create_fup(original_tid, stage["message"], delay, "auto", "if_opened_no_reply", em["user_id"], custom_scheduled_at=new_sched)
+                    time_val = stage.get("time")
+                    hour = int(time_val.split(":")[0]) if time_val and ":" in time_val else sent_at.hour
+                    new_sched = get_next_business_time(sent_at, delay, target_hour=hour)
+                    await _create_fup(original_tid, stage["message"], delay, "auto", "if_opened_no_reply", em["user_id"], custom_scheduled_at=new_sched, time=time_val)
                     logging.info(f"Proactively created missing FUP from rule '{rule.get('name')}' relative to sent_at (pixel) for {original_tid}")
                     found = True
 
@@ -1136,13 +1142,30 @@ async def stats(user: dict = Depends(get_current_user)):
     uid = user["user_id"]
     total = await db.tracked_emails.count_documents({"user_id": uid})
     opened = await db.tracked_emails.count_documents({"user_id": uid, "open_count": {"$gt": 0}})
-    follow_ups_pending = await db.follow_ups.count_documents({"user_id": uid, "sent": False})
+    replied = await db.tracked_emails.count_documents({"user_id": uid, "replied": True})
+
+    # Count pending follow-ups for non-replied emails only (match Pipeline logic)
+    pending_agg = await db.follow_ups.aggregate([
+        {"$match": {"user_id": uid, "sent": False}},
+        {"$lookup": {
+            "from": "tracked_emails",
+            "localField": "tracked_email_id",
+            "foreignField": "id",
+            "as": "email"
+        }},
+        {"$unwind": "$email"},
+        {"$match": {"email.replied": {"$ne": True}}},
+        {"$count": "count"}
+    ]).to_list(1)
+    follow_ups_pending = pending_agg[0]["count"] if pending_agg else 0
+    
     follow_ups_sent = await db.follow_ups.count_documents({"user_id": uid, "sent": True})
-    open_rate = round((opened / total) * 100, 1) if total else 0.0
+    
     return {
         "total_sent": total,
         "total_opened": opened,
-        "open_rate": open_rate,
+        "total_not_opened": total - opened,
+        "total_replied": replied,
         "follow_ups_pending": follow_ups_pending,
         "follow_ups_sent": follow_ups_sent,
     }
@@ -1150,7 +1173,7 @@ async def stats(user: dict = Depends(get_current_user)):
 # ---------- Follow-ups ----------
 @api_router.post("/follow-ups")
 async def create_follow_up(payload: FollowUpCreate, user: dict = Depends(get_current_user)):
-    return await _create_fup(payload.tracked_email_id, payload.message, payload.days_delay, payload.mode, payload.trigger_condition, user["user_id"])
+    return await _create_fup(payload.tracked_email_id, payload.message, payload.days_delay, payload.mode, payload.trigger_condition, user["user_id"], time=None)
 
 class BulkFollowUpCreate(BaseModel):
     tracked_email_ids: List[str]
@@ -1164,16 +1187,31 @@ async def bulk_create_follow_up(payload: BulkFollowUpCreate, user: dict = Depend
     results = []
     for eid in payload.tracked_email_ids:
         try:
-            res = await _create_fup(eid, payload.message, payload.days_delay, payload.mode, payload.trigger_condition, user["user_id"])
+            res = await _create_fup(eid, payload.message, payload.days_delay, payload.mode, payload.trigger_condition, user["user_id"], time=None)
             results.append(res)
         except Exception:
             continue
     return results
 
-async def _create_fup(eid, message, days, mode, condition, user_id, custom_scheduled_at=None):
+async def stop_sequences(tracked_email_id: str, user_id: str):
+    """Stops and deletes all pending follow-ups for a specific email."""
+    result = await db.follow_ups.delete_many({
+        "tracked_email_id": tracked_email_id,
+        "user_id": user_id,
+        "sent": False
+    })
+    logging.info(f"Stopped {result.deleted_count} pending follow-ups for {tracked_email_id}")
+    return result.deleted_count
+
+async def _create_fup(eid, message, days, mode, condition, user_id, custom_scheduled_at=None, time=None):
     em = await db.tracked_emails.find_one({"id": eid, "user_id": user_id}, {"_id": 0})
     if not em:
         raise HTTPException(404, "Tracked email not found")
+    
+    # Safety: Don't schedule for already replied emails
+    if em.get("replied"):
+        logging.warning(f"Aborted FUP creation for {eid}: Already replied.")
+        return None
     
     fid = uuid.uuid4().hex
     if custom_scheduled_at:
@@ -1195,6 +1233,7 @@ async def _create_fup(eid, message, days, mode, condition, user_id, custom_sched
         "scheduled_at": scheduled.isoformat(),
         "mode": mode,
         "trigger_condition": condition,
+        "time": time,
         "sent": False,
         "sent_at": None,
     }
@@ -1270,11 +1309,11 @@ async def list_rules(user: dict = Depends(get_current_user)):
 
 @api_router.get("/follow-ups")
 async def list_follow_ups(user: dict = Depends(get_current_user)):
-    fups = await db.follow_ups.find({"user_id": user["user_id"]}, {"_id": 0}).sort("scheduled_at", 1).to_list(1000)
+    fups = await db.follow_ups.find({"user_id": user["user_id"]}, {"_id": 0}).sort("scheduled_at", -1).to_list(1000)
     
     # Enrich with latest data from tracked_emails to fix draft/pending labels in UI
     tids = list(set(f["tracked_email_id"] for f in fups))
-    emails = await db.tracked_emails.find({"id": {"$in": tids}}, {"_id": 0, "id": 1, "recipient": 1, "subject": 1, "open_count": 1}).to_list(len(tids))
+    emails = await db.tracked_emails.find({"id": {"$in": tids}, "replied": {"$ne": True}}, {"_id": 0, "id": 1, "recipient": 1, "subject": 1, "open_count": 1, "replied": 1}).to_list(len(tids))
     email_map = {e["id"]: e for e in emails}
     
     final_fups = []
@@ -1297,7 +1336,7 @@ async def list_follow_ups(user: dict = Depends(get_current_user)):
             if f.get("subject") == "(draft)" and em.get("subject") != "(draft)":
                 f["subject"] = em["subject"]
         
-        final_fups.append(f)
+            final_fups.append(f)
                 
     return final_fups
 
@@ -1653,7 +1692,7 @@ async def automation_worker():
                                     frm = next((h["value"].lower() for h in hds if h["name"].lower() == "from"), "")
                                     if frm and my_email and my_email not in frm:
                                         await db.tracked_emails.update_one({"id": em["id"]}, {"$set": {"replied": True}})
-                                        await db.follow_ups.delete_many({"tracked_email_id": em["id"], "sent": False})
+                                        await stop_sequences(em["id"], f["user_id"])
                                         is_replied = True
                                         logging.info(f"Detected reply for {em['id']}. Stopped.")
                                         break
@@ -1755,7 +1794,7 @@ async def check_all_replies():
                                 if found_reply:
                                     ts = datetime.now(timezone.utc).isoformat()
                                     await db.tracked_emails.update_one({"id": em["id"]}, {"$set": {"replied": True, "replied_at": ts, "last_activity_at": ts}})
-                                    await db.follow_ups.delete_many({"tracked_email_id": em["id"], "sent": False})
+                                    await stop_sequences(em["id"], em["user_id"])
                                     push_event(em["user_id"], {"type": "reply", "tracked_id": em["id"]})
                         except Exception: pass
                     await asyncio.sleep(1.5)

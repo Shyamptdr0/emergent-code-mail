@@ -136,7 +136,8 @@ export default function Emails() {
                 <th className="px-4 py-3 text-[10px] uppercase font-bold text-slate-400 tracking-wider">Subject</th>
                 <th className="px-4 py-3 text-[10px] uppercase font-bold text-slate-400 tracking-wider">Recipient</th>
                 <th className="px-4 py-3 text-[10px] uppercase font-bold text-slate-400 tracking-wider">Automation</th>
-                <th className="px-4 py-3 text-[10px] uppercase font-bold text-slate-400 tracking-wider">Sent</th>
+                <th className="px-4 py-3 text-[10px] uppercase font-bold text-slate-400 tracking-wider">Sent At</th>
+                <th className="px-4 py-3 text-[10px] uppercase font-bold text-slate-400 tracking-wider">Opened At</th>
                 <th className="px-4 py-3 text-[10px] uppercase font-bold text-slate-400 tracking-wider text-right">Opens</th>
               </tr>
             </thead>
@@ -169,34 +170,46 @@ export default function Emails() {
                   <td className="px-4 py-3">
                     {e.replied ? (
                       <div className="flex flex-col">
-                        <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest bg-emerald-50 px-2 py-1 rounded w-fit border border-emerald-100">Replied</span>
-                        <span className="text-[9px] text-slate-400 font-bold mt-1">Campaign Stopped</span>
+                        <span className="text-[9px] font-black text-emerald-600 uppercase tracking-widest bg-emerald-50 px-2.5 py-1.5 rounded-full w-fit border border-emerald-200/50 shadow-sm flex items-center gap-1.5">
+                          <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                          Replied
+                        </span>
+                        <span className="text-[9px] text-slate-400 font-bold mt-1.5 ml-2 uppercase tracking-tighter">Campaign Ended</span>
                       </div>
                     ) : e.next_followup ? (
-                      <div className="flex flex-col group">
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className="text-sm font-black text-slate-900">{e.next_followup.label}</span>
-                          <div className={`px-1.5 py-0.5 rounded text-[8px] font-bold uppercase border ${
-                            (e.next_followup.condition === "if_no_open" || e.next_followup.condition === "if_opened_no_reply") && e.open_count === 0 
-                            ? "bg-slate-100 text-slate-500 border-slate-200" 
-                            : "bg-amber-50 text-amber-600 border-amber-100"
-                          }`}>
-                            {e.next_followup.condition.replace("if_", "").replace(/_/g, " ")}
-                            {(e.next_followup.condition === "if_no_open" || e.next_followup.condition === "if_opened_no_reply") && e.open_count === 0 && " (Waiting)"}
-                          </div>
+                      <div className="flex flex-col gap-2">
+                        <div className={`px-2.5 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border w-fit shadow-sm flex items-center gap-2 ${
+                          (e.next_followup.condition === "if_no_open" || e.next_followup.condition === "if_opened_no_reply") && e.open_count === 0 
+                          ? "bg-slate-50 text-slate-400 border-slate-200/60" 
+                          : "bg-gradient-to-br from-amber-50 to-orange-50 text-orange-600 border-orange-100"
+                        }`}>
+                          {((e.next_followup.condition === "if_no_open" || e.next_followup.condition === "if_opened_no_reply") && e.open_count === 0) ? (
+                             <Clock className="w-3.5 h-3.5 text-slate-300" />
+                          ) : (
+                             <Zap className="w-3.5 h-3.5 text-orange-400 fill-orange-400/20" />
+                          )}
+                          {e.next_followup.condition.replace("if_", "").replace(/_/g, " ")}
+                          {(e.next_followup.condition === "if_no_open" || e.next_followup.condition === "if_opened_no_reply") && e.open_count === 0 && " (Waiting)"}
                         </div>
-                        <div className="flex items-center gap-1.5 text-slate-500">
-                          <Clock className="w-3 h-3" />
+                        
+                        <div className="flex items-center gap-1.5 text-slate-400 ml-1">
+                          <div className="w-1 h-1 rounded-full bg-slate-200" />
                           <span className="text-[10px] font-bold uppercase tracking-tighter">
                             {formatRemaining(e.next_followup.scheduled_at)}
                           </span>
                         </div>
                       </div>
-                    ) : null}
+                    ) : (
+                      <span className="text-[10px] font-bold text-slate-300 uppercase tracking-widest italic">No sequence</span>
+                    )}
                   </td>
                   <td className="px-4 py-3 text-xs text-slate-500">
-                    <div className="font-bold text-slate-900">{formatRel(e.last_activity_at || e.sent_at)}</div>
-                    <div>{fmt(e.last_activity_at || e.sent_at)}</div>
+                    <div className="font-bold text-slate-900">{formatRel(e.sent_at)}</div>
+                    <div>{fmt(e.sent_at)}</div>
+                  </td>
+                  <td className="px-4 py-3 text-xs text-slate-500">
+                    <div className="font-bold text-slate-900">{formatRel(e.last_opened_at)}</div>
+                    <div>{fmt(e.last_opened_at)}</div>
                   </td>
                   <td className="px-4 py-3 text-right text-sm font-bold text-slate-900">{e.open_count}</td>
                 </tr>

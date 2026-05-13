@@ -78,11 +78,13 @@ export default function Dashboard() {
             <h1 className="text-4xl sm:text-5xl tracking-tighter font-black">{user?.name?.split(" ")[0] || "there"} — here's your inbox pulse.</h1>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4" data-testid="stats-grid">
-            <Stat icon={<Mail className="w-4 h-4" />} label="Sent" value={stats?.total_sent ?? "—"} testid="stat-sent" />
-            <Stat icon={<Eye className="w-4 h-4" />} label="Opened" value={stats?.total_opened ?? "—"} testid="stat-opened" />
-            <Stat icon={<TrendingUp className="w-4 h-4" />} label="Open rate" value={stats ? `${stats.open_rate}%` : "—"} testid="stat-rate" />
-            <Stat icon={<Send className="w-4 h-4" />} label="Follow-ups pending" value={stats?.follow_ups_pending ?? "—"} testid="stat-followups" />
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4" data-testid="stats-grid">
+            <Stat icon={<Mail className="w-4 h-4" />} label="Total Sent" value={stats?.total_sent ?? "—"} testid="stat-sent" />
+            <Stat icon={<Eye className="w-4 h-4 text-indigo-500" />} label="Total Opened" value={stats?.total_opened ?? "—"} testid="stat-opened" />
+            <Stat icon={<Eye className="w-4 h-4 text-slate-400" />} label="Not Opened" value={stats?.total_not_opened ?? "—"} testid="stat-not-opened" />
+            <Stat icon={<TrendingUp className="w-4 h-4 text-emerald-500" />} label="Total Replied" value={stats?.total_replied ?? "—"} testid="stat-replied" />
+            <Stat icon={<CheckCheck className="w-4 h-4 text-blue-500" />} label="Follow-ups Sent" value={stats?.follow_ups_sent ?? "—"} testid="stat-fups-sent" />
+            <Stat icon={<Send className="w-4 h-4 text-amber-500" />} label="Follow-ups Pending" value={stats?.follow_ups_pending ?? "—"} testid="stat-followups" />
           </div>
 
           <div>
@@ -116,11 +118,13 @@ export default function Dashboard() {
                     <div className="text-xs text-slate-500 truncate font-mono">to {e.recipient}</div>
                   </div>
                   <div className="text-right shrink-0">
-                    <div className="text-xs text-slate-500">{formatRel(e.sent_at)}</div>
-                    {e.open_count > 0 && (
-                      <div className="text-xs font-medium text-[#10B981]">
-                        {e.open_count} open{e.open_count > 1 ? "s" : ""}
+                    <div className="text-xs text-slate-500 font-bold">Sent {formatRel(e.sent_at)}</div>
+                    {e.open_count > 0 ? (
+                      <div className="text-xs font-bold text-[#10B981]">
+                         Opened {formatRel(e.last_opened_at)}
                       </div>
+                    ) : (
+                      <div className="text-xs text-slate-300 font-bold uppercase tracking-tighter">Not Opened</div>
                     )}
                   </div>
                 </Link>

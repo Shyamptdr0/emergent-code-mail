@@ -17,14 +17,14 @@ export default function Automation() {
   const [newRule, setNewRule] = useState({
     name: "",
     stages: [
-      { trigger: "no_reply", days: 1, time: "09:00", message: "" }
+      { trigger: "no_reply", days: 1, time: "", message: "" }
     ]
   });
 
   const addStage = () => {
     setNewRule({
       ...newRule,
-      stages: [...newRule.stages, { trigger: "no_reply", days: 3, time: "09:00", message: "" }]
+      stages: [...newRule.stages, { trigger: "no_reply", days: 3, time: "", message: "" }]
     });
   };
 
@@ -97,7 +97,7 @@ export default function Automation() {
   const handleCancel = () => {
     setShowAdd(false);
     setEditingId(null);
-    setNewRule({ name: "", stages: [{ trigger: "no_reply", days: 1, time: "09:00", message: "" }] });
+    setNewRule({ name: "", stages: [{ trigger: "no_reply", days: 1, time: "", message: "" }] });
   };
 
   return (
@@ -174,12 +174,13 @@ export default function Automation() {
                           className="w-14 h-8 text-center rounded border-slate-200 bg-white font-bold"
                         />
                         <span className="text-slate-400">DAYS AT</span>
-                        <Input 
-                          type="time" 
-                          value={stage.time}
-                          onChange={e => updateStage(idx, "time", e.target.value)}
-                          className="w-28 h-8 rounded border-slate-200 bg-white font-bold"
-                        />
+                          <Input 
+                            type="time" 
+                            value={stage.time}
+                            onChange={e => updateStage(idx, "time", e.target.value)}
+                            className="w-28 h-8 rounded border-slate-200 bg-white font-bold"
+                          />
+                          {!stage.time && <span className="text-[9px] text-emerald-600 ml-1 font-bold italic">(Same as Original)</span>}
                       </div>
                     </div>
 
@@ -263,7 +264,7 @@ export default function Automation() {
                 <div key={sidx} className="bg-slate-50/50 rounded p-2 border border-slate-50 flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <span className="text-[8px] font-bold uppercase text-slate-300">S{sidx+1}</span>
-                    <span className="text-[10px] font-bold text-slate-600">{stage.days}d @ {stage.time}</span>
+                    <span className="text-[10px] font-bold text-slate-600">{stage.days}d @ {stage.time || "Original Time"}</span>
                   </div>
                   <span className="text-[9px] text-slate-400 truncate max-w-[120px] italic">"{stage.message}"</span>
                 </div>

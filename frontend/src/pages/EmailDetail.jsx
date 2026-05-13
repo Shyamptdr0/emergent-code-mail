@@ -13,11 +13,22 @@ function fmt(iso) {
 function formatRel(iso) {
   if (!iso) return "—";
   const d = new Date(iso);
-  const diff = (Date.now() - d.getTime()) / 1000;
-  if (diff < 60) return "just now";
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400 * 7) return `${Math.floor(diff / 3600)}h ago`;
-  return d.toLocaleDateString();
+  const now = Date.now();
+  const diff = (now - d.getTime()) / 1000;
+
+  if (Math.abs(diff) < 60) return "just now";
+
+  if (diff > 0) {
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+    if (diff < 86400 * 7) return `${Math.floor(diff / 86400)}d ago`;
+    return d.toLocaleDateString();
+  } else {
+    const f = Math.abs(diff);
+    if (f < 3600) return `in ${Math.floor(f / 60)}m`;
+    if (f < 86400) return `in ${Math.floor(f / 3600)}h`;
+    return `in ${Math.floor(f / 86400)}d`;
+  }
 }
 
 export default function EmailDetail() {
@@ -50,36 +61,42 @@ export default function EmailDetail() {
         <ArrowLeft className="w-4 h-4" /> Back
       </button>
 
-      <div className="bg-white border border-slate-200 p-4 sm:p-8">
-        <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
+      <div className="bg-white border border-slate-200 rounded-2xl p-6 sm:p-10 shadow-sm overflow-hidden relative">
+        <div className="absolute top-0 left-0 w-1 h-full bg-slate-900" />
+        <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-6">
           <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-3 mb-3">
+            <div className="flex items-center gap-3 mb-6">
               {em.replied ? (
-                <>
-                  <MessageCircle className="w-6 h-6 shrink-0 text-emerald-500" strokeWidth={2.5} />
-                  <span className="text-xs tracking-[0.2em] uppercase font-bold text-emerald-600">Replied</span>
-                </>
+                <div className="flex items-center gap-2 bg-emerald-50 text-emerald-700 px-3 py-1 rounded-full border border-emerald-100">
+                  <MessageCircle className="w-3.5 h-3.5 shrink-0" strokeWidth={3} />
+                  <span className="text-[10px] tracking-widest uppercase font-black">Replied</span>
+                </div>
               ) : (
-                <>
-                  <CheckCheck
-                    className={`w-6 h-6 shrink-0 ${em.open_count > 0 ? "text-[#10B981]" : "text-slate-300"}`}
-                    strokeWidth={2.5}
-                  />
-                  <span className="text-xs tracking-[0.2em] uppercase font-bold text-slate-500">
-                    {em.open_count > 0 ? "Opened" : "Not yet opened"}
+                <div className={`flex items-center gap-2 px-3 py-1 rounded-full border ${em.open_count > 0 ? "bg-emerald-50 text-emerald-700 border-emerald-100" : "bg-slate-50 text-slate-400 border-slate-100"}`}>
+                  <CheckCheck className="w-3.5 h-3.5 shrink-0" strokeWidth={3} />
+                  <span className="text-[10px] tracking-widest uppercase font-black">
+                    {em.open_count > 0 ? "Opened" : "Waiting"}
                   </span>
-                </>
+                </div>
               )}
             </div>
-            <h1 className="text-3xl tracking-tight font-black break-words">{em.subject || "(no subject)"}</h1>
-            <p className="text-sm font-mono text-slate-600 mt-2">to {em.recipient}</p>
-            <p className="text-xs text-slate-500 mt-1">
-              Sent <span className="font-bold text-slate-900">{formatRel(em.sent_at)}</span> ({fmt(em.sent_at)})
-            </p>
+            <h1 className="text-4xl tracking-tighter font-black break-words leading-tight">{em.subject || "(no subject)"}</h1>
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2 mt-4 text-sm">
+              <div className="flex items-center gap-2">
+                <span className="text-slate-400 font-medium">Recipient:</span>
+                <span className="font-bold text-slate-900">{em.recipient}</span>
+              </div>
+              <div className="w-1 h-1 rounded-full bg-slate-300 hidden sm:block" />
+              <div className="flex items-center gap-2">
+                <span className="text-slate-400 font-medium">Sent:</span>
+                <span className="font-bold text-slate-900">{formatRel(em.sent_at)}</span>
+                <span className="text-xs text-slate-400">({fmt(em.sent_at)})</span>
+              </div>
+            </div>
           </div>
-          <div className="flex items-center gap-2 shrink-0">
-            <Button data-testid="delete-email-btn" onClick={remove} variant="outline" className="border-slate-300 rounded-sm">
-              <Trash2 className="w-4 h-4" />
+          <div className="flex items-center gap-2 shrink-0 self-end sm:self-start">
+            <Button data-testid="delete-email-btn" onClick={remove} variant="outline" className="border-slate-200 rounded-xl hover:bg-red-50 hover:text-red-600 hover:border-red-200 transition-all px-4 py-6 shadow-sm">
+              <Trash2 className="w-5 h-5" />
             </Button>
           </div>
         </div>
