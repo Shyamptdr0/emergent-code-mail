@@ -1,26 +1,65 @@
-from fastapi import FastAPI, APIRouter, Request, Response, HTTPException, Depends, Header
-from fastapi.responses import StreamingResponse, Response as FastResponse
+from fastapi import FastAPI, APIRouter, Request, Response, HTTPException, Depends, Header, Query
+from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.exceptions import RequestValidationError
+from starlette.middleware.base import BaseHTTPMiddleware
+from google.oauth2 import id_token
+from google.auth.transport import requests as google_requests
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
-import logging
-import asyncio
 import json
+import logging
 import uuid
-import secrets
-import base64
-from pathlib import Path
-from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
-from datetime import datetime, timezone, timedelta
+import asyncio
 import httpx
+import base64
+import secrets
+import time
+from pathlib import Path
+from typing import List, Optional, Dict, Any
+from collections import deque
+from datetime import datetime, timedelta, timezone
+from pydantic import BaseModel, Field
 
-def get_next_business_time(dt: datetime, days_offset: int, target_hour: Optional[int] = None):
+# --- RATE LIMITING & CACHING ---
+class RateLimiter:
+    def __init__(self, requests_limit: int, window_seconds: int):
+        self.limit = requests_limit
+        self.window = window_seconds
+        self.history = {} # {ip: deque([timestamps])}
+
+    def is_allowed(self, client_id: str) -> bool:
+        now = time.time()
+        if client_id not in self.history:
+            self.history[client_id] = deque()
+        
+        # Remove old timestamps
+        while self.history[client_id] and self.history[client_id][0] < now - self.window:
+            self.history[client_id].popleft()
+            
+        if len(self.history[client_id]) < self.limit:
+            self.history[client_id].append(now)
+            return True
+        return False
+
+# Global limiters
+api_limiter = RateLimiter(60, 60) # 60 requests per minute
+track_limiter = RateLimiter(120, 60) # 120 pixel hits per minute
+
+# Simple Auth Cache
+AUTH_CACHE = {} # {token: {"user": dict, "expiry": timestamp}}
+CACHE_TTL = 300 # 5 minutes
+
+def get_next_business_time(dt: datetime, offset: int, unit: str = "days", target_hour: Optional[int] = None):
     """Calculates the next scheduled time, skipping weekends.
+    unit: 'days' or 'hours'
     On weekdays: preserves exact minutes/seconds unless a target_hour is provided.
     On weekends: shifts to Monday at exactly 10:00 AM."""
-    target = dt + timedelta(days=days_offset)
+    if unit == "hours":
+        target = dt + timedelta(hours=offset)
+    else:
+        target = dt + timedelta(days=offset)
     
     # 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri, 5=Sat, 6=Sun
     if target.weekday() >= 5: # Saturday or Sunday
@@ -28,13 +67,12 @@ def get_next_business_time(dt: datetime, days_offset: int, target_hour: Optional
         target = target + timedelta(days=days_to_monday)
         # Shift to exactly 10 AM Monday
         target = target.replace(hour=10, minute=0, second=0, microsecond=0)
-    elif target_hour is not None:
-        # Override the hour but preserve minutes/seconds
+    elif target_hour is not None and unit == "days":
+        # Override the hour only for 'days' unit
         target = target.replace(hour=target_hour)
     
     return target
-from google.oauth2 import id_token
-from google.auth.transport import requests as google_requests
+
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -63,6 +101,14 @@ app.add_middleware(
     max_age=600,
 )
 
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    logging.error(f"422 Validation Error at {request.url.path}: {exc.errors()}")
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors()},
+    )
 
 # Explicit OPTIONS handler to prevent 400 on Preflight
 @app.options("/api/auth/google-native")
@@ -161,32 +207,55 @@ class FollowUp(BaseModel):
     recipient: str
     subject: str
     message: str
-    days_delay: int
+    days_delay: Optional[int] = None # backward compatibility
+    delay_value: Optional[int] = None
+    delay_unit: str = "days"
+    sequence_order: int = 0  # NEW: Step 1, 2, 3...
     scheduled_at: str
     mode: str
     sent: bool = False
+    completed: bool = False  # NEW: True once dispatched
     sent_at: Optional[str] = None
     trigger_condition: str = "always"
+    repeated_followup: bool = False  # NEW: True if resending last stage
+    repeated_cycle: int = 0  # NEW: 1, 2, 3...
     open_count: int = 0
     opens: List[Dict[str, Any]] = []
     time: Optional[str] = None
 
 class AutomationStage(BaseModel):
     trigger: str
-    days: int
+    delay_value: Optional[int] = None
+    days: Optional[int] = None # backward compatibility
+    delay_unit: str = "days" # 'days' or 'hours'
     time: str # 'HH:MM'
     message: str
 
 class AutomationRuleCreate(BaseModel):
     name: str
     stages: List[AutomationStage]
+    repeat_last: bool = False # NEW: Whether to repeat the final stage
 
 class AutomationRule(BaseModel):
     id: str
     user_id: str
     name: str
     stages: List[AutomationStage]
+    repeat_last: bool = False # NEW
     created_at: str
+
+# --- PERSISTENT TASK QUEUE MODELS ---
+class Task(BaseModel):
+    id: str
+    user_id: str
+    type: str # 'send_fup', 'check_reply', 'maintenance'
+    payload: dict
+    status: str = "pending" # 'pending', 'running', 'completed', 'failed'
+    scheduled_at: str
+    created_at: str
+    retries: int = 0
+    max_retries: int = 3
+    error_log: List[str] = []
 
 # ---------- Auth helpers ----------
 async def get_current_user(request: Request, authorization: Optional[str] = Header(None)) -> dict:
@@ -195,19 +264,33 @@ async def get_current_user(request: Request, authorization: Optional[str] = Head
         token = authorization[7:]
     if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    # Check Cache
+    now = time.time()
+    if token in AUTH_CACHE:
+        entry = AUTH_CACHE[token]
+        if now < entry["expiry"]:
+            return entry["user"]
+    
     sess = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
     if not sess:
         raise HTTPException(status_code=401, detail="Invalid session")
+    
     expires_at = sess["expires_at"]
     if isinstance(expires_at, str):
         expires_at = datetime.fromisoformat(expires_at)
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
+        
     if expires_at < datetime.now(timezone.utc):
         raise HTTPException(status_code=401, detail="Session expired")
+    
     user = await db.users.find_one({"user_id": sess["user_id"]}, {"_id": 0})
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
+        
+    # Save to Cache
+    AUTH_CACHE[token] = {"user": user, "expiry": now + CACHE_TTL}
     return user
 
 # ---------- Auth endpoints ----------
@@ -424,14 +507,17 @@ async def create_tracked(payload: TrackCreate, request: Request, user: dict = De
 
                 try:
                     time_val = stage.get("time")
+                    val = stage.get("delay_value", 1)
+                    unit = stage.get("delay_unit", "days")
                     hour = int(time_val.split(":")[0]) if time_val and ":" in time_val else None
-                    scheduled = get_next_business_time(now_dt, stage["days"], target_hour=hour)
+                    scheduled = get_next_business_time(now_dt, val, unit=unit, target_hour=hour)
                 except:
-                    scheduled = now_dt + timedelta(days=stage["days"])
+                    scheduled = now_dt + timedelta(days=stage.get("delay_value", 1))
 
                 await _create_fup(
-                    tid, stage["message"], stage["days"], "auto", cond, user["user_id"],
-                    custom_scheduled_at=scheduled, time=stage.get("time")
+                    tid, stage["message"], stage.get("delay_value", 1), stage.get("delay_unit", "days"), "auto", cond, user["user_id"],
+                    custom_scheduled_at=scheduled, time=stage.get("time"),
+                    sequence_order=1
                 )
                 logging.info(f"Instantly scheduled Stage 1 of '{rule_name}' for tracking ID: {tid}")
     except Exception as e:
@@ -496,7 +582,7 @@ async def update_tracked(tid: str, payload: TrackUpdate, user: dict = Depends(ge
         
         # Get existing follow-up stages to avoid duplicates
         existing_fups = await db.follow_ups.find({"tracked_email_id": tid, "user_id": user["user_id"]}).to_list(100)
-        existing_delays = { (f["days_delay"], f["trigger_condition"]) for f in existing_fups }
+        existing_delays = { (f.get("delay_value"), f.get("delay_unit", "days"), f["trigger_condition"]) for f in existing_fups }
 
         # Apply Automation Sequences
         rules = await db.automation_rules.find({"user_id": user["user_id"]}).to_list(100)
@@ -523,28 +609,32 @@ async def update_tracked(tid: str, payload: TrackUpdate, user: dict = Depends(ge
             # Use business time logic if hours are provided, else simple days
             try:
                 time_val = stage.get("time")
+                val = stage.get("delay_value", 1)
+                unit = stage.get("delay_unit", "days")
                 hour = int(time_val.split(":")[0]) if time_val and ":" in time_val else None
-                scheduled = get_next_business_time(sent_at_dt, stage["days"], target_hour=hour)
+                scheduled = get_next_business_time(sent_at_dt, val, unit=unit, target_hour=hour)
             except Exception:
-                scheduled = sent_at_dt + timedelta(days=stage["days"])
+                scheduled = sent_at_dt + timedelta(days=stage.get("delay_value", 1))
 
             # Only schedule missing 'no_open' stages upfront
-            if cond == "if_no_open" and (stage["days"], cond) not in existing_delays:
+            if cond == "if_no_open" and (val, unit, cond) not in existing_delays:
                 await _create_fup(
                     tid, 
                     stage["message"], 
-                    stage["days"], 
+                    val, 
+                    unit,
                     "auto", 
                     cond, 
                     user["user_id"],
                     custom_scheduled_at=scheduled,
-                    time=stage.get("time")
+                    time=stage.get("time"),
+                    sequence_order=1
                 )
-                logging.info(f"Scheduled Stage 1 from '{rule_name}' ({cond}, Day {stage['days']}) for {tid}")
-            elif (stage["days"], cond) in existing_delays:
+                logging.info(f"Scheduled Stage 1 from '{rule_name}' ({cond}, {val} {unit}) for {tid}")
+            elif (val, unit, cond) in existing_delays:
                 # Update existing one's schedule for precision relative to final sent time
                 await db.follow_ups.update_one(
-                    {"tracked_email_id": tid, "days_delay": stage["days"], "trigger_condition": cond, "sent": False},
+                    {"tracked_email_id": tid, "delay_value": val, "delay_unit": unit, "trigger_condition": cond, "sent": False},
                     {"$set": {"scheduled_at": scheduled.isoformat()}}
                 )
 
@@ -622,38 +712,9 @@ async def list_emails_ext(user: dict = Depends(get_user_by_ext_key)):
     cursor = db.tracked_emails.find({"user_id": user["user_id"]}, {"_id": 0})
     return await cursor.sort("sent_at", -1).to_list(1000)
 
-@api_router.get("/events/stream")
-async def events_stream(key: str):
-    """Server-Sent Events for instant extension notifications."""
-    user = await db.users.find_one({"ext_api_key": key})
-    if not user:
-        raise HTTPException(401, "Invalid key")
-    
-    user_id = user["user_id"]
-    
-    async def event_generator():
-        queue = asyncio.Queue()
-        if user_id not in event_queues:
-            event_queues[user_id] = []
-        event_queues[user_id].append(queue)
-        
-        try:
-            yield f"data: {json.dumps({'type': 'connected'})}\n\n"
-            while True:
-                try:
-                    payload = await asyncio.wait_for(queue.get(), timeout=30.0)
-                    yield f"data: {json.dumps(payload)}\n\n"
-                except asyncio.TimeoutError:
-                    yield ": keep-alive\n\n"
-        except asyncio.CancelledError:
-            pass
-        finally:
-            if user_id in event_queues and queue in event_queues[user_id]:
-                event_queues[user_id].remove(queue)
-                if not event_queues[user_id]:
-                    del event_queues[user_id]
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    
+
 
 
 @api_router.post("/track/heartbeat-viewing")
@@ -711,7 +772,7 @@ async def mark_viewing(tid: str, user: dict = Depends(get_user_by_ext_key)):
     )
     return {"ok": True, "self_viewing_until": until}
 
-from pydantic import BaseModel
+
 class NotifiedUpdate(BaseModel):
     count: int
 
@@ -864,11 +925,11 @@ async def track_pixel(tid: str, request: Request):
 
     em = await db.tracked_emails.find_one({"id": original_tid})
     if not em:
-        return FastResponse(content=PIXEL_PNG, media_type="image/png")
+        return Response(content=PIXEL_PNG, media_type="image/png")
 
     # Ignore draft loads
     if em.get("status") == "draft":
-        return FastResponse(content=PIXEL_PNG, media_type="image/png")
+        return Response(content=PIXEL_PNG, media_type="image/png")
 
     # Check if there is a newer email sent to the same recipient.
     # If so, we sleep longer to let the newer email register its open first!
@@ -887,7 +948,7 @@ async def track_pixel(tid: str, request: Request):
     
     # Re-fetch for updated self-viewing flags
     em = await db.tracked_emails.find_one({"id": original_tid})
-    if not em: return FastResponse(content=PIXEL_PNG, media_type="image/png")
+    if not em: return Response(content=PIXEL_PNG, media_type="image/png")
 
     ts = datetime.now(timezone.utc).isoformat()
     ua = request.headers.get("user-agent", "")
@@ -1007,15 +1068,16 @@ async def track_pixel(tid: str, request: Request):
                 
                 if open_stages:
                     stage = open_stages[0]
-                    delay = stage.get("days", 1)
+                    val = stage.get("delay_value", 1)
+                    unit = stage.get("delay_unit", "days")
                     time_val = stage.get("time")
                     hour = int(time_val.split(":")[0]) if time_val and ":" in time_val else sent_at.hour
-                    new_sched = get_next_business_time(sent_at, delay, target_hour=hour)
+                    new_sched = get_next_business_time(sent_at, val, unit=unit, target_hour=hour)
                     
-                    await _create_fup(original_tid, stage["message"], delay, "auto", "if_opened_no_reply", em["user_id"], custom_scheduled_at=new_sched, time=time_val)
-                    logging.info(f"Proactively scheduled 1st 'opened_no_reply' stage from '{rule_name}' (Day {delay}) for {original_tid}")
+                    await _create_fup(original_tid, stage["message"], val, unit, "auto", "if_opened_no_reply", em["user_id"], custom_scheduled_at=new_sched, time=time_val, sequence_order=1)
+                    logging.info(f"Proactively scheduled 1st 'opened_no_reply' stage from '{rule_name}' ({val} {unit}) for {original_tid}")
 
-    return FastResponse(content=PIXEL_PNG, media_type="image/png", headers={
+    return Response(content=PIXEL_PNG, media_type="image/png", headers={
         "Cache-Control": "private, no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
         "Pragma": "no-cache", "Expires": "0"
     })
@@ -1097,9 +1159,10 @@ async def list_emails(user: dict = Depends(get_current_user)):
                     # Check if it was already sent (to avoid double-creating)
                     already_sent = await db.follow_ups.find_one({"tracked_email_id": tid, "trigger_condition": cond, "sent": True})
                     if not already_sent:
-                        delay = stage.get("days", 1)
-                        new_sched = get_next_business_time(datetime.now(timezone.utc), delay)
-                        new_fup = await _create_fup(tid, stage["message"], delay, "auto", cond, user["user_id"], custom_scheduled_at=new_sched)
+                        val = stage.get("delay_value") or stage.get("days", 1)
+                        unit = stage.get("delay_unit", "days")
+                        new_sched = get_next_business_time(datetime.now(timezone.utc), val, unit=unit)
+                        new_fup = await _create_fup(tid, stage["message"], val, unit, "auto", cond, user["user_id"], custom_scheduled_at=new_sched, sequence_order=1)
                         r["next_followup"] = {
                             "id": new_fup["id"],
                             "subject": new_fup["subject"],
@@ -1197,7 +1260,7 @@ async def stats(user: dict = Depends(get_current_user)):
 # ---------- Follow-ups ----------
 @api_router.post("/follow-ups")
 async def create_follow_up(payload: FollowUpCreate, user: dict = Depends(get_current_user)):
-    return await _create_fup(payload.tracked_email_id, payload.message, payload.days_delay, payload.mode, payload.trigger_condition, user["user_id"], time=None)
+    return await _create_fup(payload.tracked_email_id, payload.message, payload.days_delay, "days", payload.mode, payload.trigger_condition, user["user_id"], time=None)
 
 class BulkFollowUpCreate(BaseModel):
     tracked_email_ids: List[str]
@@ -1211,7 +1274,7 @@ async def bulk_create_follow_up(payload: BulkFollowUpCreate, user: dict = Depend
     results = []
     for eid in payload.tracked_email_ids:
         try:
-            res = await _create_fup(eid, payload.message, payload.days_delay, payload.mode, payload.trigger_condition, user["user_id"], time=None)
+            res = await _create_fup(eid, payload.message, payload.days_delay, "days", payload.mode, payload.trigger_condition, user["user_id"], time=None)
             results.append(res)
         except Exception:
             continue
@@ -1227,7 +1290,9 @@ async def stop_sequences(tracked_email_id: str, user_id: str):
     logging.info(f"Stopped {result.deleted_count} pending follow-ups for {tracked_email_id}")
     return result.deleted_count
 
-async def _create_fup(eid, message, days, mode, condition, user_id, custom_scheduled_at=None, time=None):
+async def _create_fup(eid, message, delay_value, delay_unit, mode, condition, user_id, 
+                  custom_scheduled_at=None, time=None, 
+                  sequence_order=0, repeated_followup=False, repeated_cycle=0):
     em = await db.tracked_emails.find_one({"id": eid, "user_id": user_id}, {"_id": 0})
     if not em:
         raise HTTPException(404, "Tracked email not found")
@@ -1238,14 +1303,17 @@ async def _create_fup(eid, message, days, mode, condition, user_id, custom_sched
         return None
 
     # DE-DUPLICATION: Don't create if exact same stage already exists (pending or sent)
+    # For repeated follow-ups, we allow creation if the cycle is different
     existing = await db.follow_ups.find_one({
         "tracked_email_id": eid,
-        "days_delay": days,
+        "delay_value": delay_value,
+        "delay_unit": delay_unit,
         "trigger_condition": condition,
+        "repeated_cycle": repeated_cycle,
         "user_id": user_id
     })
     if existing:
-        logging.info(f"FUP stage (Day {days}, {condition}) already exists for {eid}. Skipping.")
+        logging.info(f"FUP stage ({delay_value} {delay_unit}, {condition}, Cycle {repeated_cycle}) already exists for {eid}. Skipping.")
         return existing
     
     fid = uuid.uuid4().hex
@@ -1256,7 +1324,11 @@ async def _create_fup(eid, message, days, mode, condition, user_id, custom_sched
         sent_at = datetime.fromisoformat(sent_at_raw) if isinstance(sent_at_raw, str) else sent_at_raw
         if sent_at.tzinfo is None:
             sent_at = sent_at.replace(tzinfo=timezone.utc)
-        scheduled = sent_at + timedelta(days=days)
+        
+        if delay_unit == "hours":
+            scheduled = sent_at + timedelta(hours=delay_value)
+        else:
+            scheduled = sent_at + timedelta(days=delay_value)
 
     doc = {
         "id": fid,
@@ -1265,63 +1337,93 @@ async def _create_fup(eid, message, days, mode, condition, user_id, custom_sched
         "recipient": em["recipient"],
         "subject": em["subject"],
         "message": message,
-        "days_delay": days,
+        "delay_value": delay_value,
+        "delay_unit": delay_unit,
+        "sequence_order": sequence_order,
         "scheduled_at": scheduled.isoformat(),
         "mode": mode,
         "trigger_condition": condition,
         "time": time,
         "sent": False,
+        "completed": False,
         "sent_at": None,
         "status": "scheduled",
+        "repeated_followup": repeated_followup,
+        "repeated_cycle": repeated_cycle
     }
     await db.follow_ups.insert_one(doc)
     
+    # Update current pointer in parent email
+    await db.tracked_emails.update_one({"id": eid}, {"$set": {"current_active_followup_id": fid}})
+
     # Store specific scheduled timestamps in parent email for easier access
-    if days == 1:
+    if delay_value == 1 and delay_unit == "days" and not repeated_followup:
         await db.tracked_emails.update_one({"id": eid}, {"$set": {"followup1_scheduled_at": scheduled.isoformat()}})
-    elif days == 3:
+    elif delay_value == 3 and delay_unit == "days" and not repeated_followup:
         await db.tracked_emails.update_one({"id": eid}, {"$set": {"followup2_scheduled_at": scheduled.isoformat()}})
 
     doc.pop("_id", None)
     return doc
 
-async def schedule_next_stage(tid, user_id, last_days, last_condition):
-    """Calculates and schedules the NEXT stage in the automation sequence relative to NOW."""
+async def schedule_next_stage(tid, user_id, last_fup):
+    """Calculates and schedules the NEXT stage in the automation sequence.
+    If no next stage exists, optionally repeats the last one."""
+    last_val = last_fup.get("delay_value")
+    last_unit = last_fup.get("delay_unit", "days")
+    last_cond = last_fup.get("trigger_condition")
+    last_order = last_fup.get("sequence_order", 0)
+    
     rules = await db.automation_rules.find({"user_id": user_id}).to_list(100)
     if not rules: return
     
     for rule in rules:
         stages = rule.get("stages", [])
+        repeat_enabled = rule.get("repeat_last", False)
+        
         # Find if this rule contains the stage we just finished
         current_idx = -1
         for i, s in enumerate(stages):
-            # Normalize condition
             trigger = s.get("trigger")
             cond = "if_no_open" if trigger == "no_open" else ("if_opened_no_reply" if trigger == "opened_no_reply" else f"if_{trigger}")
-            if s.get("days") == last_days and cond == last_condition:
+            if s.get("delay_value") == last_val and s.get("delay_unit", "days") == last_unit and cond == last_cond:
                 current_idx = i
                 break
         
-        if current_idx != -1 and current_idx + 1 < len(stages):
-            next_stage = stages[current_idx + 1]
-            # Use NOW as the base for the next countdown
-            now_dt = datetime.now(timezone.utc)
-            delay = next_stage.get("days", 1) # Note: If stages are 1, 3, 5, the user might expect +2 days. 
-            # But the requirement says "exactly on Day 3 after FUP1". 
-            # So if FUP1 was 1 day, and FUP2 is 3 days, maybe they want 3 days from NOW?
-            # User said: "send exactly on Day 3 after Follow-up 1 sent time"
-            # So we use next_stage["days"] as the offset from NOW.
+        if current_idx != -1:
+            next_stage = None
+            new_order = last_order + 1
+            is_repeated = False
+            cycle = 0
             
-            time_val = next_stage.get("time")
-            hour = int(time_val.split(":")[0]) if time_val and ":" in time_val else None
-            new_sched = get_next_business_time(now_dt, delay, target_hour=hour)
+            if current_idx + 1 < len(stages):
+                # NEXT QUEUED FOLLOW-UP EXISTS
+                next_stage = stages[current_idx + 1]
+                logging.info(f"FOLLOW-UP COMPLETED: Stage {last_order} for {tid}. NEXT STAGE ACTIVATED.")
+            elif repeat_enabled:
+                # NO MORE STEPS -> TRIGGER REPEAT MODE
+                next_stage = stages[current_idx]
+                is_repeated = True
+                cycle = last_fup.get("repeated_cycle", 0) + 1
+                logging.info(f"QUEUE EMPTY for {tid}. REPEATING STAGE (Cycle {cycle}).")
             
-            trigger = next_stage.get("trigger")
-            cond = "if_no_open" if trigger == "no_open" else ("if_opened_no_reply" if trigger == "opened_no_reply" else f"if_{trigger}")
-            
-            await _create_fup(tid, next_stage["message"], delay, "auto", cond, user_id, custom_scheduled_at=new_sched, time=time_val)
-            logging.info(f"Cascaded to next stage (Day {delay}, {cond}) for {tid} after previous send.")
-            break
+            if next_stage:
+                now_dt = datetime.now(timezone.utc)
+                val = next_stage.get("delay_value", 1)
+                unit = next_stage.get("delay_unit", "days")
+                
+                time_val = next_stage.get("time")
+                hour = int(time_val.split(":")[0]) if time_val and ":" in time_val else None
+                new_sched = get_next_business_time(now_dt, val, unit=unit, target_hour=hour)
+                
+                trigger = next_stage.get("trigger")
+                cond = "if_no_open" if trigger == "no_open" else ("if_opened_no_reply" if trigger == "opened_no_reply" else f"if_{trigger}")
+                
+                await _create_fup(
+                    tid, next_stage["message"], val, unit, "auto", cond, user_id, 
+                    custom_scheduled_at=new_sched, time=time_val, 
+                    sequence_order=new_order, repeated_followup=is_repeated, repeated_cycle=cycle
+                )
+                break
 
 async def find_thread_info(access_token, recipient, subject):
     """Searches Gmail for a thread by recipient and subject to enable correct threading."""
@@ -1595,6 +1697,7 @@ async def _schedule_next_stage_if_needed(tid: str, user_id: str):
             tid, 
             next_stage["message"], 
             delay, 
+            "days",
             "auto", 
             cond, 
             user_id, 
@@ -1729,6 +1832,12 @@ async def ensure_google_token(user_id: str):
         # If no refresh token, we just have to hope the access token is still valid
         return access_token
 
+    # Check local cache for valid token status to avoid redundant Google API hits
+    now = time.time()
+    cache_key = f"token_valid_{user_id}"
+    if AUTH_CACHE.get(cache_key, 0) > now:
+        return access_token
+
     # Check if the current token works
     async with httpx.AsyncClient() as client:
         test_res = await client.get(
@@ -1736,6 +1845,8 @@ async def ensure_google_token(user_id: str):
             headers={"Authorization": f"Bearer {access_token}"}
         )
         if test_res.status_code == 200:
+            # Cache the validity for 30 minutes
+            AUTH_CACHE[cache_key] = now + 1800
             return access_token
             
         # If 401, refresh the token
@@ -1816,207 +1927,233 @@ async def send_gmail_message(access_token: str, recipient: str, subject: str, bo
         )
         return r.status_code == 200
 
-async def automation_worker():
-    """Background task that sends due 'auto' follow-ups via Gmail API."""
-    logging.info("Automation worker started.")
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        while True:
+async def process_reply_check_task(task):
+    payload = task["payload"]
+    tracked_id = payload.get("tracked_id")
+    user_id = task["user_id"]
+    
+    em = await db.tracked_emails.find_one({"id": tracked_id})
+    if not em or em.get("replied"): return True
+    
+    token = await ensure_google_token(user_id)
+    if not token: return False
+    
+    user = await db.users.find_one({"user_id": user_id})
+    my_email = user.get("email", "").lower() if user else ""
+    
+    if em.get("gmail_thread_id"):
+        async with httpx.AsyncClient(timeout=30.0) as client:
             try:
-                now_iso = datetime.now(timezone.utc).isoformat()
-                dues = await db.follow_ups.find({
-                    "sent": False,
-                    "mode": "auto",
-                    "scheduled_at": {"$lte": now_iso}
-                }).sort("scheduled_at", 1).to_list(10)
-                
-                if not dues:
-                    await asyncio.sleep(60)
-                    continue
+                thread_url = f"https://gmail.googleapis.com/gmail/v1/users/me/threads/{em['gmail_thread_id']}"
+                r = await client.get(thread_url, headers={"Authorization": f"Bearer {token}"})
+                if r.status_code == 200:
+                    msgs = r.json().get("messages", [])
+                    for m in msgs:
+                        hds = m.get("payload", {}).get("headers", [])
+                        frm = next((h["value"].lower() for h in hds if h["name"].lower() == "from"), "")
+                        if frm and my_email and my_email not in frm:
+                            await db.tracked_emails.update_one({"id": em["id"]}, {"$set": {"replied": True, "last_activity_at": datetime.now(timezone.utc).isoformat()}})
+                            await stop_sequences(em["id"], user_id)
+                            logging.info(f"Reply detected for {em['id']} via autonomous task.")
+                            return True
+            except Exception: pass
+    return True
 
-                for f in dues:
-                    token = await ensure_google_token(f["user_id"])
-                    if not token: continue
-                    
-                    user = await db.users.find_one({"user_id": f["user_id"]})
-                    my_email = user.get("email", "").lower() if user else ""
-                    
-                    em = await db.tracked_emails.find_one({"id": f["tracked_email_id"]})
-                    if not em: continue
-                
-                    is_replied = em.get("replied", False)
-                    if not is_replied and em.get("gmail_thread_id"):
-                        try:
-                            thread_url = f"https://gmail.googleapis.com/gmail/v1/users/me/threads/{em['gmail_thread_id']}"
-                            r = await client.get(thread_url, headers={"Authorization": f"Bearer {token}"})
-                            if r.status_code == 200:
-                                msgs = r.json().get("messages", [])
-                                for m in msgs:
-                                    hds = m.get("payload", {}).get("headers", [])
-                                    frm = next((h["value"].lower() for h in hds if h["name"].lower() == "from"), "")
-                                    if frm and my_email and my_email not in frm:
-                                        await db.tracked_emails.update_one({"id": em["id"]}, {"$set": {"replied": True}})
-                                        await stop_sequences(em["id"], f["user_id"])
-                                        is_replied = True
-                                        logging.info(f"Detected reply for {em['id']}. Stopped.")
-                                        break
-                        except Exception: pass
-
-                    cond = f.get("trigger_condition", "always")
-
-                    is_opened = em.get("open_count", 0) > 0
-                    
-                    # For cascading sequences, check if the previous follow-up was opened
-                    if cond == "if_opened_no_reply":
-                        current_delay = f.get("days_delay", 999)
-                        previous_fups = await db.follow_ups.find({
-                            "tracked_email_id": em["id"],
-                            "sent": True,
-                            "days_delay": {"$lt": current_delay}
-                        }).sort("days_delay", -1).to_list(1)
-                        
-                        if previous_fups:
-                            is_opened = previous_fups[0].get("open_count", 0) > 0
-
-                    should_send = False
-                    if cond == "always": 
-                        should_send = True
-                    elif cond == "if_not_opened" or cond == "if_no_open": 
-                        should_send = not is_opened
-                    elif cond == "if_not_replied" or cond == "if_no_reply": 
-                        should_send = not is_replied
-                    elif cond == "if_opened_no_reply":
-                        should_send = is_opened and not is_replied
-                    
-                    if is_replied: should_send = False
-                    
-                    if should_send:
-                        # 3. Inject tracking pixel
-                        thread_id, parent_msg_id = await find_thread_info(token, em["recipient"], em["subject"])
-                        
-                        backend_url = os.environ.get("BACKEND_URL", "http://localhost:8001").rstrip("/")
-                        pixel_url = f"{backend_url}/api/track/pixel/{f['id']}.png"
-                        pixel_html = f'<img src="{pixel_url}" width="1" height="1" style="display:none;" />'
-                        full_body = f"{f['message']}<br/><br/>{pixel_html}"
-                        
-                        success = await send_gmail_message(
-                            token, 
-                            em["recipient"], 
-                            em["subject"], 
-                            full_body,
-                            thread_id=thread_id,
-                            parent_msg_id=parent_msg_id
-                        )
-                        if success:
-                            # 4. Mark as sent
-                            now_sent = datetime.now(timezone.utc).isoformat()
-                            await db.follow_ups.update_one(
-                                {"id": f["id"]},
-                                {"$set": {"sent": True, "sent_at": now_sent, "status": "sent"}}
-                            )
-                            
-                            # Update tracked_emails with specific timestamps for FUP1, FUP2
-                            upd = {"$inc": {"follow_up_count": 1}, "$set": {"last_activity_at": now_sent}}
-                            if f.get("days_delay") == 1:
-                                upd["$set"]["followup1_sent_at"] = now_sent
-                            elif f.get("days_delay") == 3:
-                                upd["$set"]["followup2_sent_at"] = now_sent
-                            
-                            await db.tracked_emails.update_one({"id": em["id"]}, upd)
-                            
-                            logging.info(f"Auto follow-up sent to {f['recipient']} for {em['id']} (Status: Sent)")
-                            
-                            # Trigger UI refresh via SSE
-                            push_event(f["user_id"], {
-                                "type": "followup_sent",
-                                "tracked_id": em["id"],
-                                "recipient": em["recipient"]
-                            })
-                            
-                            # CASCADING: Schedule the next stage automatically
-                            await schedule_next_stage(em["id"], f["user_id"], f.get("days_delay"), f.get("trigger_condition"))
-                        else:
-                            logging.error(f"Failed to send auto follow-up {f['id']} for {em['id']}. Will retry.")
-
-            except Exception as e:
-                logging.error(f"Automation worker error: {e}")
-                
-            await asyncio.sleep(10) # Run every 10 seconds for automation
+async def reply_watcher_dispatcher():
+    """Periodically queues reply check tasks for all active follow-up sequences."""
+    while True:
+        try:
+            # Find all tracked emails that have active (scheduled) follow-ups and haven't been checked in 30 mins
+            active_tracked = await db.tracked_emails.find({
+                "replied": {"$ne": True}
+            }).to_list(100)
+            
+            for em in active_tracked:
+                # Only check if there are pending follow-ups
+                has_pending = await db.follow_ups.count_documents({"tracked_email_id": em["id"], "sent": False, "status": "scheduled"})
+                if has_pending > 0:
+                    await schedule_task(em["user_id"], "check_replies", {"tracked_id": em["id"]}, datetime.now(timezone.utc))
+        except Exception as e:
+            logging.error(f"Error in reply_watcher_dispatcher: {e}")
+        await asyncio.sleep(1800) # Every 30 minutes
 
 
-async def check_all_replies():
-    """Background task to scan pending emails for replies efficiently."""
-    logging.info("Reply detection worker started.")
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        while True:
-            try:
-                # Only check emails sent in the last 14 days to save RAM
-                limit_date = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
-                pending = await db.tracked_emails.find({
-                    "replied": {"$ne": True},
-                    "status": "sent",
-                    "sent_at": {"$gte": limit_date}
-                }).sort("last_activity_at", -1).to_list(15)
-                
-                if not pending:
-                    await asyncio.sleep(120)
-                    continue
-
-                for em in pending:
-                    token = await ensure_google_token(em["user_id"])
-                    if not token: continue
-                    user = await db.users.find_one({"user_id": em["user_id"]})
-                    my_email = user.get("email", "").lower() if user else ""
-                    
-                    tid = em.get("gmail_thread_id")
-                    if not tid:
-                        tid, _ = await find_thread_info(token, em["recipient"], em["subject"])
-                        if tid: await db.tracked_emails.update_one({"id": em["id"]}, {"$set": {"gmail_thread_id": tid}})
-                    
-                    if tid:
-                        try:
-                            thread_url = f"https://gmail.googleapis.com/gmail/v1/users/me/threads/{tid}"
-                            r = await client.get(thread_url, headers={"Authorization": f"Bearer {token}"})
-                            if r.status_code == 200:
-                                msgs = r.json().get("messages", [])
-                                found_reply = False
-                                for m in msgs:
-                                    hds = m.get("payload", {}).get("headers", [])
-                                    frm = next((h["value"].lower() for h in hds if h["name"].lower() == "from"), "")
-                                    if frm and my_email and my_email not in frm:
-                                        found_reply = True; break
-                                
-                                if found_reply:
-                                    ts = datetime.now(timezone.utc).isoformat()
-                                    await db.tracked_emails.update_one({"id": em["id"]}, {"$set": {"replied": True, "replied_at": ts, "last_activity_at": ts}})
-                                    await stop_sequences(em["id"], em["user_id"])
-                                    push_event(em["user_id"], {"type": "reply", "tracked_id": em["id"]})
-                        except Exception: pass
-                    await asyncio.sleep(1.5)
-                await asyncio.sleep(60)
-            except Exception as e:
-                logging.error(f"Reply worker error: {e}")
-                await asyncio.sleep(60)
 
             
+async def schedule_task(user_id: str, task_type: str, payload: dict, scheduled_at: datetime):
+    tid = uuid.uuid4().hex
+    task = {
+        "id": tid,
+        "user_id": user_id,
+        "type": task_type,
+        "payload": payload,
+        "status": "pending",
+        "scheduled_at": scheduled_at.isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "retries": 0,
+        "max_retries": 3,
+        "error_log": []
+    }
+    await db.tasks.insert_one(task)
+    logging.info(f"TASK QUEUED: {task_type} for {user_id} at {scheduled_at.isoformat()}")
+    return tid
+
+async def task_worker():
+    """Persistent background worker that processes the task queue with retry logic."""
+    logging.info("Autonomous Task Worker started.")
+    while True:
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            # Find one pending task that is due
+            task = await db.tasks.find_one_and_update(
+                {
+                    "status": {"$in": ["pending", "retrying"]},
+                    "scheduled_at": {"$lte": now}
+                },
+                {"$set": {"status": "running", "started_at": now}},
+                sort=[("scheduled_at", 1)]
+            )
+            
+            if not task:
+                await asyncio.sleep(10)
+                continue
+                
+            logging.info(f"PROCESSING TASK: {task['type']} ({task['id']})")
+            success = False
+            error_msg = ""
+            
+            try:
+                if task["type"] == "send_fup":
+                    success = await process_send_task(task)
+                elif task["type"] == "check_replies":
+                    success = await process_reply_check_task(task)
+                # ... add other task types ...
+            except Exception as e:
+                error_msg = str(e)
+                logging.error(f"Task {task['id']} failed: {e}")
+            
+            if success:
+                await db.tasks.update_one({"id": task["id"]}, {"$set": {"status": "completed", "completed_at": datetime.now(timezone.utc).isoformat()}})
+            else:
+                retries = task.get("retries", 0) + 1
+                if retries <= task.get("max_retries", 3):
+                    # Exponential backoff: 5m, 15m, 45m...
+                    delay = (3 ** retries) * 300 
+                    next_run = datetime.now(timezone.utc) + timedelta(seconds=delay)
+                    await db.tasks.update_one(
+                        {"id": task["id"]}, 
+                        {
+                            "$set": {"status": "retrying", "retries": retries, "scheduled_at": next_run.isoformat()},
+                            "$push": {"error_log": f"Attempt {retries} failed: {error_msg}"}
+                        }
+                    )
+                else:
+                    await db.tasks.update_one(
+                        {"id": task["id"]}, 
+                        {"$set": {"status": "failed", "failed_at": datetime.now(timezone.utc).isoformat()}}
+                    )
+                    logging.error(f"TASK PERMANENTLY FAILED: {task['id']}")
+                    
+        except Exception as e:
+            logging.error(f"Critical error in task_worker: {e}")
+            await asyncio.sleep(30)
+
+async def process_send_task(task):
+    payload = task["payload"]
+    fup_id = payload.get("fup_id")
+    f = await db.follow_ups.find_one({"id": fup_id})
+    if not f or f.get("sent") or f.get("status") == "stopped":
+        return True # Task no longer relevant
+    
+    # Reuse existing send logic but adapted for task worker
+    # I'll call a helper function here
+    return await execute_fup_send(f)
+
+async def execute_fup_send(f):
+    # Logic extracted from the old automation_worker
+    token = await ensure_google_token(f["user_id"])
+    if not token: return False
+    
+    em = await db.tracked_emails.find_one({"id": f["tracked_email_id"]})
+    if not em or em.get("replied"): return True
+    
+    # 3. Inject tracking pixel
+    thread_id, parent_msg_id = await find_thread_info(token, em["recipient"], em["subject"])
+    backend_url = os.environ.get("BACKEND_URL", "http://localhost:8001").rstrip("/")
+    pixel_url = f"{backend_url}/api/track/pixel/{f['id']}.png"
+    pixel_html = f'<img src="{pixel_url}" width="1" height="1" style="display:none;" />'
+    full_body = f"{f['message']}<br/><br/>{pixel_html}"
+    
+    success = await send_gmail_message(
+        token, 
+        em["recipient"], 
+        em["subject"], 
+        full_body,
+        thread_id=thread_id,
+        parent_msg_id=parent_msg_id
+    )
+    if success:
+        now_sent = datetime.now(timezone.utc).isoformat()
+        await db.follow_ups.update_one(
+            {"id": f["id"]},
+            {"$set": {"sent": True, "completed": True, "sent_at": now_sent, "status": "sent"}}
+        )
+        # Update tracked_emails with specific timestamps for FUP1, FUP2 (UI compatibility)
+        upd = {"$inc": {"follow_up_count": 1}, "$set": {"last_activity_at": now_sent}}
+        val = f.get("delay_value", 1)
+        unit = f.get("delay_unit", "days")
+        if val == 1 and unit == "days":
+            upd["$set"]["followup1_sent_at"] = now_sent
+        elif val == 3 and unit == "days":
+            upd["$set"]["followup2_sent_at"] = now_sent
+            
+        await db.tracked_emails.update_one({"id": em["id"]}, upd)
+        push_event(f["user_id"], {"type": "followup_sent", "tracked_id": em["id"]})
+        await schedule_next_stage(em["id"], f["user_id"], f)
+        return True
+    return False
+
 @app.on_event("startup")
 async def startup_event():
-
-    # MIGRATION: Ensure all emails have last_activity_at for consistent sorting
-    # We find all documents where last_activity_at is missing and set it to sent_at
-    cursor = db.tracked_emails.find({"last_activity_at": {"$exists": False}})
-    async for doc in cursor:
-        await db.tracked_emails.update_one(
-            {"_id": doc["_id"]},
-            {"$set": {"last_activity_at": doc.get("sent_at", datetime.now(timezone.utc).isoformat())}}
-        )
+    # 1. RECOVERY: Reset any 'running' tasks from previous crash
+    await db.tasks.update_many({"status": "running"}, {"$set": {"status": "pending"}})
     
-    asyncio.create_task(automation_worker())
-    asyncio.create_task(check_all_replies())
+    # 2. START WORKERS
+    asyncio.create_task(task_worker())
+    
+    # 3. DISPATCHER: Periodically convert scheduled FUPs into tasks
+    asyncio.create_task(dispatcher_worker())
+    
+    # 4. REPLY WATCHER: Periodically check threads for replies
+    asyncio.create_task(reply_watcher_dispatcher())
+
+async def dispatcher_worker():
+    """Periodically scans the follow_ups collection and moves due items into the task queue."""
+    while True:
+        try:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            # Find follow-ups that are due but don't have a task yet
+            dues = await db.follow_ups.find({
+                "sent": False,
+                "status": "scheduled",
+                "scheduled_at": {"$lte": now_iso},
+                "task_queued": {"$ne": True}
+            }).to_list(50)
+            
+            for f in dues:
+                await schedule_task(f["user_id"], "send_fup", {"fup_id": f["id"]}, datetime.fromisoformat(f["scheduled_at"]))
+                await db.follow_ups.update_one({"id": f["id"]}, {"$set": {"task_queued": True}})
+                
+        except Exception as e:
+            logging.error(f"Error in dispatcher_worker: {e}")
+        await asyncio.sleep(60)
 
 # ---------- SSE notifications ----------
 @api_router.get("/events/stream")
-async def events_stream(request: Request, token: Optional[str] = None, key: Optional[str] = None):
+async def events_stream(request: Request):
     # Allow token via query for EventSource
+    token = request.query_params.get("token")
+    key = request.query_params.get("key")
     user = None
     if token:
         sess = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
@@ -2027,7 +2164,8 @@ async def events_stream(request: Request, token: Optional[str] = None, key: Opti
         
     if not user:
         try:
-            user = await get_current_user(request)
+            # Pass None for the authorization header if calling manually
+            user = await get_current_user(request, authorization=None)
         except HTTPException:
             raise HTTPException(401, "Not authenticated")
 
@@ -2064,6 +2202,31 @@ async def events_stream(request: Request, token: Optional[str] = None, key: Opti
 @api_router.get("/")
 async def root():
     return {"message": "MailTrack API"}
+
+
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # Identify client (use user_id if logged in, else IP)
+        client_id = "unknown"
+        if request.client:
+            client_id = request.client.host
+        
+        # Apply different limits based on path
+        path = request.url.path
+        if path.startswith("/api/track"):
+            if not track_limiter.is_allowed(client_id):
+                return Response(content='{"error": "Too many tracking hits"}', status_code=429, media_type="application/json")
+        elif path.startswith("/api"):
+            if not api_limiter.is_allowed(client_id):
+                return Response(content='{"error": "Too many requests. Please wait."}', status_code=429, media_type="application/json")
+        
+        response = await call_next(request)
+        if response.status_code == 422:
+            logging.error(f"422 Error at {path}")
+        return response
+
+app.add_middleware(RateLimitMiddleware)
 
 @api_router.get("/download/source")
 async def download_source():

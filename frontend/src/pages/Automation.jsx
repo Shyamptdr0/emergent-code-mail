@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Zap, Clock, Trash2, Plus, Calendar, Layers, Edit2 } from "lucide-react";
+import { Zap, Clock, Trash2, Plus, Calendar, Layers, Edit2, ChevronUp, ChevronDown } from "lucide-react";
 import { api } from "../lib/api";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -17,14 +17,14 @@ export default function Automation() {
   const [newRule, setNewRule] = useState({
     name: "",
     stages: [
-      { trigger: "no_reply", days: 1, time: "", message: "" }
+      { trigger: "no_open", delay_value: 1, delay_unit: "days", time: "", message: "" }
     ]
   });
 
   const addStage = () => {
     setNewRule({
       ...newRule,
-      stages: [...newRule.stages, { trigger: "no_reply", days: 3, time: "", message: "" }]
+      stages: [...newRule.stages, { trigger: "no_open", delay_value: 3, delay_unit: "days", time: "", message: "" }]
     });
   };
 
@@ -32,6 +32,14 @@ export default function Automation() {
     if (newRule.stages.length === 1) return;
     const s = [...newRule.stages];
     s.splice(index, 1);
+    setNewRule({ ...newRule, stages: s });
+  };
+
+  const moveStage = (index, dir) => {
+    const s = [...newRule.stages];
+    const target = index + dir;
+    if (target < 0 || target >= s.length) return;
+    [s[index], s[target]] = [s[target], s[index]];
     setNewRule({ ...newRule, stages: s });
   };
 
@@ -87,6 +95,7 @@ export default function Automation() {
   const handleEdit = (rule) => {
     setNewRule({
       name: rule.name,
+      repeat_last: rule.repeat_last || false,
       stages: rule.stages.map(s => ({ ...s }))
     });
     setEditingId(rule.id);
@@ -97,7 +106,7 @@ export default function Automation() {
   const handleCancel = () => {
     setShowAdd(false);
     setEditingId(null);
-    setNewRule({ name: "", stages: [{ trigger: "no_reply", days: 1, time: "", message: "" }] });
+    setNewRule({ name: "", repeat_last: false, stages: [{ trigger: "no_open", delay_value: 1, delay_unit: "days", time: "", message: "" }] });
   };
 
   return (
@@ -130,6 +139,16 @@ export default function Automation() {
                 className="h-9 rounded border-slate-200 font-bold text-sm"
               />
             </div>
+            <div className="flex items-center gap-2 px-4 border-l border-slate-100 ml-4">
+              <input 
+                type="checkbox" 
+                id="repeat_last"
+                checked={newRule.repeat_last || false}
+                onChange={e => setNewRule({...newRule, repeat_last: e.target.checked})}
+                className="w-4 h-4 rounded border-slate-300 text-black focus:ring-black"
+              />
+              <Label htmlFor="repeat_last" className="text-[10px] font-bold uppercase tracking-wider text-slate-500 cursor-pointer">Repeat Sequence</Label>
+            </div>
             {editingId && <span className="text-[10px] font-bold uppercase text-emerald-600 bg-emerald-50 px-2 py-1 rounded border border-emerald-100">Editing Mode</span>}
           </div>
 
@@ -141,8 +160,18 @@ export default function Automation() {
                 </div>
                 
                 <div className="space-y-4">
-                  <div className="flex items-center gap-4">
-                    <h3 className="text-xs font-bold uppercase tracking-wider text-slate-900">Step {idx + 1}</h3>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-4">
+                      <h3 className="text-xs font-bold uppercase tracking-wider text-slate-900">Step {idx + 1}</h3>
+                      <div className="flex items-center gap-1">
+                        <button onClick={() => moveStage(idx, -1)} disabled={idx === 0} className="p-1 text-slate-300 hover:text-black disabled:opacity-30">
+                          <ChevronUp className="w-4 h-4" />
+                        </button>
+                        <button onClick={() => moveStage(idx, 1)} disabled={idx === newRule.stages.length - 1} className="p-1 text-slate-300 hover:text-black disabled:opacity-30">
+                          <ChevronDown className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
                     {newRule.stages.length > 1 && (
                       <button onClick={() => removeStage(idx)} className="text-slate-300 hover:text-red-500 transition-colors">
                         <Trash2 className="w-3.5 h-3.5" />
@@ -169,18 +198,31 @@ export default function Automation() {
                         <span className="text-slate-400">AFTER</span>
                         <Input 
                           type="number" 
-                          value={stage.days}
-                          onChange={e => updateStage(idx, "days", Number(e.target.value))}
+                          value={stage.delay_value || stage.days || 1}
+                          onChange={e => updateStage(idx, "delay_value", Number(e.target.value))}
                           className="w-14 h-8 text-center rounded border-slate-200 bg-white font-bold"
                         />
-                        <span className="text-slate-400">DAYS AT</span>
-                          <Input 
-                            type="time" 
-                            value={stage.time}
-                            onChange={e => updateStage(idx, "time", e.target.value)}
-                            className="w-28 h-8 rounded border-slate-200 bg-white font-bold"
-                          />
-                          {!stage.time && <span className="text-[9px] text-emerald-600 ml-1 font-bold italic">(Same as Original)</span>}
+                        <Select value={stage.delay_unit || "days"} onValueChange={v => updateStage(idx, "delay_unit", v)}>
+                          <SelectTrigger className="w-20 h-8 rounded border-slate-200 bg-white">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="hours">Hours</SelectItem>
+                            <SelectItem value="days">Days</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        {(stage.delay_unit || "days") === "days" && (
+                          <div className="flex items-center gap-2">
+                            <span className="text-slate-400 ml-1">AT</span>
+                            <Input 
+                              type="time" 
+                              value={stage.time}
+                              onChange={e => updateStage(idx, "time", e.target.value)}
+                              className="w-28 h-8 rounded border-slate-200 bg-white font-bold"
+                            />
+                            {!stage.time && <span className="text-[9px] text-emerald-600 font-bold italic">(Original)</span>}
+                          </div>
+                        )}
                       </div>
                     </div>
 
@@ -264,7 +306,9 @@ export default function Automation() {
                 <div key={sidx} className="bg-slate-50/50 rounded p-2 border border-slate-50 flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <span className="text-[8px] font-bold uppercase text-slate-300">S{sidx+1}</span>
-                    <span className="text-[10px] font-bold text-slate-600">{stage.days}d @ {stage.time || "Original Time"}</span>
+                    <span className="text-[10px] font-bold text-slate-600">
+                      {stage.delay_value || stage.days || 1}{stage.delay_unit === "hours" ? "h" : "d"} @ {stage.time || "Original Time"}
+                    </span>
                   </div>
                   <span className="text-[9px] text-slate-400 truncate max-w-[120px] italic">"{stage.message}"</span>
                 </div>

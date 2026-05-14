@@ -73,7 +73,11 @@ export default function FollowUps() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold tracking-tight text-slate-900">Follow-up Pipeline</h1>
-        <div className="flex gap-2">
+        <div className="flex items-center gap-2">
+           <div className="flex items-center gap-2 px-3 py-1 bg-emerald-50 text-emerald-600 rounded border border-emerald-100 shadow-sm">
+             <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
+             <span className="text-[10px] font-black uppercase tracking-wider">Autonomous Engine Online</span>
+           </div>
            <div className="px-3 py-1 bg-white border border-slate-200 rounded text-[10px] font-bold uppercase text-slate-500 shadow-sm">
              {rows.filter(r => !r.sent).length} Scheduled
            </div>
@@ -105,22 +109,38 @@ export default function FollowUps() {
                 rows.map((f) => (
                   <tr key={f.id} className="hover:bg-slate-50/50 transition-colors">
                     <td className="px-4 py-3">
-                      <div className="flex items-center gap-2">
-                        {f.sent ? (
-                          <div className="flex items-center gap-1.5 px-2 py-0.5 bg-emerald-50 text-emerald-600 rounded-full border border-emerald-100 shadow-sm">
-                            <CheckCheck className="w-3 h-3" strokeWidth={3} />
-                            <span className="text-[9px] font-black uppercase tracking-tight">Sent</span>
-                          </div>
-                        ) : f.status === 'stopped' ? (
-                          <div className="px-2 py-0.5 bg-slate-100 text-slate-400 rounded-full border border-slate-200">
-                             <span className="text-[9px] font-black uppercase tracking-tight">Stopped</span>
-                          </div>
-                        ) : (
-                          <div className="flex items-center gap-2">
-                             <div className="w-4 h-4 rounded-full border-2 border-slate-100 border-t-blue-500 animate-spin" />
-                             <span className="text-[10px] font-bold text-blue-600 uppercase tracking-tighter">Counting Down</span>
-                          </div>
-                        )}
+                      <div className="flex flex-col gap-1">
+                        <div className="flex items-center gap-2">
+                          {f.completed ? (
+                            <div className="flex items-center gap-1.5 px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-full border border-emerald-200 shadow-sm">
+                              <CheckCheck className="w-3 h-3" strokeWidth={3} />
+                              <span className="text-[9px] font-black uppercase tracking-tight">Completed</span>
+                            </div>
+                          ) : f.sent ? (
+                            <div className="flex items-center gap-1.5 px-2 py-0.5 bg-blue-50 text-blue-600 rounded-full border border-blue-100 shadow-sm">
+                              <CheckCheck className="w-3 h-3" strokeWidth={3} />
+                              <span className="text-[9px] font-black uppercase tracking-tight">Sent</span>
+                            </div>
+                          ) : f.status === 'stopped' ? (
+                            <div className="px-2 py-0.5 bg-slate-100 text-slate-400 rounded-full border border-slate-200">
+                               <span className="text-[9px] font-black uppercase tracking-tight">Stopped</span>
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-2">
+                               <div className="w-4 h-4 rounded-full border-2 border-slate-100 border-t-blue-500 animate-spin" />
+                               <span className="text-[10px] font-bold text-blue-600 uppercase tracking-tighter">Counting Down</span>
+                            </div>
+                          )}
+
+                          {f.repeated_followup && (
+                            <div className="px-2 py-0.5 bg-indigo-50 text-indigo-600 rounded-full border border-indigo-100 flex items-center gap-1">
+                              <span className="text-[9px] font-black uppercase tracking-tight">Cycle {f.repeated_cycle}</span>
+                            </div>
+                          )}
+                        </div>
+                        <div className="text-[9px] font-bold text-slate-400 uppercase tracking-widest pl-0.5">
+                          Step {f.sequence_order || 1} · {f.trigger_condition.replace("if_", "").replace(/_/g, " ")}
+                        </div>
                       </div>
                     </td>
                     <td className="px-4 py-3 max-w-xs">
