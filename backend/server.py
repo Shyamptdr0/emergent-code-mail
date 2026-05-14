@@ -401,16 +401,27 @@ async def create_tracked(payload: TrackCreate, request: Request, user: dict = De
     # --- INSTANT AUTOMATION SCHEDULING ---
     # We schedule the sequence NOW so the countdown is ready immediately.
     try:
-        rules = await db.automation_rules.find({"user_id": user["user_id"]}).to_list(1)
+        rules = await db.automation_rules.find({"user_id": user["user_id"]}).to_list(100)
         if rules:
-            rule = rules[0]
             now_dt = datetime.now(timezone.utc)
-            for stage in rule["stages"]:
+            for rule in rules:
+                rule_name = rule.get("name", "Unnamed Rule")
+                all_stages = rule.get("stages", [])
+                if not all_stages: continue
+                
+                # ONLY schedule the FIRST stage upfront. 
+                # Subsequent stages will be cascaded by the automation_worker once the previous one is sent.
+                stage = all_stages[0]
+                
                 trigger = stage.get("trigger", "no_reply")
                 if trigger == "no_open": cond = "if_no_open"
                 elif trigger == "opened_no_reply": cond = "if_opened_no_reply"
                 else: cond = f"if_{trigger}"
                 
+                # Only schedule no_open stages upfront
+                if cond != "if_no_open":
+                    continue
+
                 try:
                     time_val = stage.get("time")
                     hour = int(time_val.split(":")[0]) if time_val and ":" in time_val else None
@@ -422,7 +433,7 @@ async def create_tracked(payload: TrackCreate, request: Request, user: dict = De
                     tid, stage["message"], stage["days"], "auto", cond, user["user_id"],
                     custom_scheduled_at=scheduled, time=stage.get("time")
                 )
-            logging.info(f"Instantly scheduled automation for new tracking ID: {tid}")
+                logging.info(f"Instantly scheduled Stage 1 of '{rule_name}' for tracking ID: {tid}")
     except Exception as e:
         logging.error(f"Instant schedule failed for {tid}: {e}")
 
@@ -481,31 +492,30 @@ async def update_tracked(tid: str, payload: TrackUpdate, user: dict = Depends(ge
                 {"$set": fup_update}
             )
         
-        fups = await db.follow_ups.find({"tracked_email_id": tid, "user_id": user["user_id"], "sent": False}).to_list(100)
-        if fups:
-            logging.info(f"Automation already exists for {tid}. Rescheduling for precision...")
-            for f in fups:
-                time_val = f.get("time")
-                hour = int(time_val.split(":")[0]) if time_val and ":" in time_val else None
-                new_sched = get_next_business_time(sent_at_dt, f["days_delay"], target_hour=hour)
-                await db.follow_ups.update_one({"id": f["id"]}, {"$set": {"scheduled_at": new_sched.isoformat()}})
-            return {"ok": True}
+        sent_at_dt = datetime.now(timezone.utc)
+        
+        # Get existing follow-up stages to avoid duplicates
+        existing_fups = await db.follow_ups.find({"tracked_email_id": tid, "user_id": user["user_id"]}).to_list(100)
+        existing_delays = { (f["days_delay"], f["trigger_condition"]) for f in existing_fups }
 
-        # Find any active automation rules for this user
-        rules = await db.automation_rules.find({"user_id": user["user_id"]}).to_list(10)
+        # Apply Automation Sequences
+        rules = await db.automation_rules.find({"user_id": user["user_id"]}).to_list(100)
+        
         if not rules:
             logging.warning(f"No automation rules found for user {user['user_id']}. Cannot schedule follow-ups.")
             return {"ok": True}
+        
+        logging.info(f"Applying all active rules to email {tid}")
+        
+        for rule in rules:
+            rule_name = rule.get("name", "Unnamed Rule")
+            all_stages = rule.get("stages", [])
+            if not all_stages: continue
 
-        sent_at_dt = datetime.now(timezone.utc)
-        
-        # Apply the first rule found (usually only one active campaign)
-        rule = rules[0]
-        logging.info(f"Applying campaign '{rule.get('name')}' to email {tid}")
-        
-        for idx, stage in enumerate(rule["stages"]):
+            # ONLY schedule the FIRST stage upfront. 
+            stage = all_stages[0]
+            
             trigger = stage.get("trigger", "no_reply")
-            # Normalize trigger labels
             if trigger == "no_open": cond = "if_no_open"
             elif trigger == "opened_no_reply": cond = "if_opened_no_reply"
             else: cond = f"if_{trigger}"
@@ -518,6 +528,8 @@ async def update_tracked(tid: str, payload: TrackUpdate, user: dict = Depends(ge
             except Exception:
                 scheduled = sent_at_dt + timedelta(days=stage["days"])
 
+            # Only schedule missing 'no_open' stages upfront
+            if cond == "if_no_open" and (stage["days"], cond) not in existing_delays:
                 await _create_fup(
                     tid, 
                     stage["message"], 
@@ -528,9 +540,15 @@ async def update_tracked(tid: str, payload: TrackUpdate, user: dict = Depends(ge
                     custom_scheduled_at=scheduled,
                     time=stage.get("time")
                 )
-            logging.info(f"Scheduled Stage {idx+1} ({cond}) for {tid} at {scheduled.isoformat()}")
+                logging.info(f"Scheduled Stage 1 from '{rule_name}' ({cond}, Day {stage['days']}) for {tid}")
+            elif (stage["days"], cond) in existing_delays:
+                # Update existing one's schedule for precision relative to final sent time
+                await db.follow_ups.update_one(
+                    {"tracked_email_id": tid, "days_delay": stage["days"], "trigger_condition": cond, "sent": False},
+                    {"$set": {"scheduled_at": scheduled.isoformat()}}
+                )
 
-    return {"ok": True}
+        return {"ok": True}
 
 class HeartbeatViewing(BaseModel):
     tracked_ids: List[str]
@@ -783,42 +801,46 @@ async def extension_assisted_open(tid: str, request: Request, user: dict = Depen
             logging.info(f"Deleted {deleted.deleted_count} 'no open' follow-ups for {tid} because of extension-open")
 
         # 2. Reschedule "opened but no reply" follow-ups relative to NOW
-        pending_opened = await db.follow_ups.find_one({
+        existing_opened = await db.follow_ups.find_one({
             "tracked_email_id": tid,
-            "sent": False,
             "trigger_condition": "if_opened_no_reply"
         })
         
-        if pending_opened:
-            # Reschedule existing one relative to MAIN SENT TIME
-            sent_at_raw = em.get("sent_at")
-            sent_at = datetime.fromisoformat(sent_at_raw) if isinstance(sent_at_raw, str) else sent_at_raw
-            if sent_at and sent_at.tzinfo is None: sent_at = sent_at.replace(tzinfo=timezone.utc)
-            
-            delay = pending_opened.get("days_delay", 1)
-            # Use same hour as main mail
-            new_sched = get_next_business_time(sent_at, delay, target_hour=sent_at.hour)
-            await db.follow_ups.update_one(
-                {"id": pending_opened["id"]},
-                {"$set": {"scheduled_at": new_sched.isoformat()}}
-            )
-            logging.info(f"Rescheduled existing FUP relative to sent_at for {tid}")
+        if existing_opened:
+            if not existing_opened.get("sent"):
+                # Reschedule existing one relative to MAIN SENT TIME
+                sent_at_raw = em.get("sent_at")
+                sent_at = datetime.fromisoformat(sent_at_raw) if isinstance(sent_at_raw, str) else sent_at_raw
+                if sent_at and sent_at.tzinfo is None: sent_at = sent_at.replace(tzinfo=timezone.utc)
+                
+                delay = existing_opened.get("days_delay", 1)
+                # Use same hour as main mail
+                new_sched = get_next_business_time(sent_at, delay, target_hour=sent_at.hour)
+                await db.follow_ups.update_one(
+                    {"id": existing_opened["id"]},
+                    {"$set": {"scheduled_at": new_sched.isoformat()}}
+                )
+                logging.info(f"Rescheduled existing FUP relative to sent_at for {tid}")
         else:
-            # 3. PROACTIVE FETCH: Scan ALL rules for an 'open' trigger
-            rules = await db.automation_rules.find({"user_id": user["user_id"]}).to_list(10)
-            for rule in rules:
-                stages = [s for s in rule.get("stages", []) if s.get("trigger") in ["opened_no_reply", "no_reply"]]
-                for stage in stages:
-                    sent_at_raw = em.get("sent_at")
-                    sent_at = datetime.fromisoformat(sent_at_raw) if isinstance(sent_at_raw, str) else sent_at_raw
-                    if sent_at and sent_at.tzinfo is None: sent_at = sent_at.replace(tzinfo=timezone.utc)
-                    
+            # 3. PROACTIVE FETCH: Schedule ALL 'opened_no_reply' stages for the sequence
+            rules = await db.automation_rules.find({"user_id": user["user_id"]}).sort([("updated_at", -1), ("created_at", -1)]).to_list(1)
+            
+            if rules:
+                all_stages = rules[0].get("stages", [])
+                open_stages = [s for s in all_stages if s.get("trigger") in ["opened_no_reply", "no_reply"]]
+                
+                sent_at_raw = em.get("sent_at")
+                sent_at = datetime.fromisoformat(sent_at_raw) if isinstance(sent_at_raw, str) else sent_at_raw
+                if sent_at and sent_at.tzinfo is None: sent_at = sent_at.replace(tzinfo=timezone.utc)
+
+                for stage in open_stages:
                     delay = stage.get("days", 1)
                     time_val = stage.get("time")
                     hour = int(time_val.split(":")[0]) if time_val and ":" in time_val else sent_at.hour
                     new_sched = get_next_business_time(sent_at, delay, target_hour=hour)
+                    
                     await _create_fup(tid, stage["message"], delay, "auto", "if_opened_no_reply", user["user_id"], custom_scheduled_at=new_sched, time=time_val)
-                    logging.info(f"Proactively created stage (Day {delay}) from rule '{rule.get('name')}' for {tid}")
+                    logging.info(f"Proactively scheduled 'opened_no_reply' stage (Day {delay}) for {tid}")
     return {"ok": True}
 
 @api_router.get("/emails/{tid}")
@@ -958,7 +980,7 @@ async def track_pixel(tid: str, request: Request):
         if deleted.deleted_count > 0:
             logging.info(f"Deleted {deleted.deleted_count} 'no open' follow-ups for {original_tid} because of pixel-open")
 
-        # 2. Reschedule "opened but no reply" follow-ups relative to NOW
+        # 2. Reschedule or Create "opened but no reply" follow-ups
         pending_opened = await db.follow_ups.find_one({
             "tracked_email_id": original_tid,
             "sent": False,
@@ -966,7 +988,7 @@ async def track_pixel(tid: str, request: Request):
         })
         
         if pending_opened:
-            # Reschedule existing one relative to MAIN SENT TIME
+            # Reschedule existing pending one relative to MAIN SENT TIME
             delay = pending_opened.get("days_delay", 1)
             new_sched = get_next_business_time(sent_at, delay, target_hour=sent_at.hour)
             await db.follow_ups.update_one(
@@ -975,21 +997,23 @@ async def track_pixel(tid: str, request: Request):
             )
             logging.info(f"Rescheduled existing FUP relative to sent_at (pixel) for {original_tid}")
         else:
-            # 3. PROACTIVE FETCH: Scan ALL rules for an 'open' trigger
-            rules = await db.automation_rules.find({"user_id": em["user_id"]}).to_list(10)
-            found = False
+            # 3. PROACTIVE FETCH: Schedule ONLY THE FIRST 'opened_no_reply' stage
+            rules = await db.automation_rules.find({"user_id": em["user_id"]}).to_list(100)
+            
             for rule in rules:
-                if found: break
-                stage = next((s for s in rule.get("stages", []) if s.get("trigger") in ["opened_no_reply", "no_reply"]), None)
-                if stage:
+                rule_name = rule.get("name", "Unnamed Rule")
+                all_stages = rule.get("stages", [])
+                open_stages = [s for s in all_stages if s.get("trigger") in ["opened_no_reply", "no_reply"]]
+                
+                if open_stages:
+                    stage = open_stages[0]
                     delay = stage.get("days", 1)
                     time_val = stage.get("time")
                     hour = int(time_val.split(":")[0]) if time_val and ":" in time_val else sent_at.hour
                     new_sched = get_next_business_time(sent_at, delay, target_hour=hour)
+                    
                     await _create_fup(original_tid, stage["message"], delay, "auto", "if_opened_no_reply", em["user_id"], custom_scheduled_at=new_sched, time=time_val)
-                    logging.info(f"Proactively created missing FUP from rule '{rule.get('name')}' relative to sent_at (pixel) for {original_tid}")
-                    found = True
-
+                    logging.info(f"Proactively scheduled 1st 'opened_no_reply' stage from '{rule_name}' (Day {delay}) for {original_tid}")
 
     return FastResponse(content=PIXEL_PNG, media_type="image/png", headers={
         "Cache-Control": "private, no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
@@ -1212,12 +1236,24 @@ async def _create_fup(eid, message, days, mode, condition, user_id, custom_sched
     if em.get("replied"):
         logging.warning(f"Aborted FUP creation for {eid}: Already replied.")
         return None
+
+    # DE-DUPLICATION: Don't create if exact same stage already exists (pending or sent)
+    existing = await db.follow_ups.find_one({
+        "tracked_email_id": eid,
+        "days_delay": days,
+        "trigger_condition": condition,
+        "user_id": user_id
+    })
+    if existing:
+        logging.info(f"FUP stage (Day {days}, {condition}) already exists for {eid}. Skipping.")
+        return existing
     
     fid = uuid.uuid4().hex
     if custom_scheduled_at:
         scheduled = custom_scheduled_at
     else:
-        sent_at = datetime.fromisoformat(em["sent_at"]) if isinstance(em["sent_at"], str) else em["sent_at"]
+        sent_at_raw = em.get("sent_at")
+        sent_at = datetime.fromisoformat(sent_at_raw) if isinstance(sent_at_raw, str) else sent_at_raw
         if sent_at.tzinfo is None:
             sent_at = sent_at.replace(tzinfo=timezone.utc)
         scheduled = sent_at + timedelta(days=days)
@@ -1236,10 +1272,56 @@ async def _create_fup(eid, message, days, mode, condition, user_id, custom_sched
         "time": time,
         "sent": False,
         "sent_at": None,
+        "status": "scheduled",
     }
     await db.follow_ups.insert_one(doc)
+    
+    # Store specific scheduled timestamps in parent email for easier access
+    if days == 1:
+        await db.tracked_emails.update_one({"id": eid}, {"$set": {"followup1_scheduled_at": scheduled.isoformat()}})
+    elif days == 3:
+        await db.tracked_emails.update_one({"id": eid}, {"$set": {"followup2_scheduled_at": scheduled.isoformat()}})
+
     doc.pop("_id", None)
     return doc
+
+async def schedule_next_stage(tid, user_id, last_days, last_condition):
+    """Calculates and schedules the NEXT stage in the automation sequence relative to NOW."""
+    rules = await db.automation_rules.find({"user_id": user_id}).to_list(100)
+    if not rules: return
+    
+    for rule in rules:
+        stages = rule.get("stages", [])
+        # Find if this rule contains the stage we just finished
+        current_idx = -1
+        for i, s in enumerate(stages):
+            # Normalize condition
+            trigger = s.get("trigger")
+            cond = "if_no_open" if trigger == "no_open" else ("if_opened_no_reply" if trigger == "opened_no_reply" else f"if_{trigger}")
+            if s.get("days") == last_days and cond == last_condition:
+                current_idx = i
+                break
+        
+        if current_idx != -1 and current_idx + 1 < len(stages):
+            next_stage = stages[current_idx + 1]
+            # Use NOW as the base for the next countdown
+            now_dt = datetime.now(timezone.utc)
+            delay = next_stage.get("days", 1) # Note: If stages are 1, 3, 5, the user might expect +2 days. 
+            # But the requirement says "exactly on Day 3 after FUP1". 
+            # So if FUP1 was 1 day, and FUP2 is 3 days, maybe they want 3 days from NOW?
+            # User said: "send exactly on Day 3 after Follow-up 1 sent time"
+            # So we use next_stage["days"] as the offset from NOW.
+            
+            time_val = next_stage.get("time")
+            hour = int(time_val.split(":")[0]) if time_val and ":" in time_val else None
+            new_sched = get_next_business_time(now_dt, delay, target_hour=hour)
+            
+            trigger = next_stage.get("trigger")
+            cond = "if_no_open" if trigger == "no_open" else ("if_opened_no_reply" if trigger == "opened_no_reply" else f"if_{trigger}")
+            
+            await _create_fup(tid, next_stage["message"], delay, "auto", cond, user_id, custom_scheduled_at=new_sched, time=time_val)
+            logging.info(f"Cascaded to next stage (Day {delay}, {cond}) for {tid} after previous send.")
+            break
 
 async def find_thread_info(access_token, recipient, subject):
     """Searches Gmail for a thread by recipient and subject to enable correct threading."""
@@ -1347,6 +1429,7 @@ async def update_rule(rid: str, payload: AutomationRuleCreate, user: dict = Depe
         {"$set": {
             "name": payload.name,
             "stages": [s.model_dump() for s in payload.stages],
+            "updated_at": datetime.now(timezone.utc).isoformat()
         }}
     )
     if res.matched_count == 0:
@@ -1382,7 +1465,20 @@ async def due_follow_ups(user: dict = Depends(get_user_by_ext_key)):
             continue
             
         condition = f.get("trigger_condition", "always")
-        is_opened = em.get("open_count", 0) > 0
+        
+        # Cascade dependency: determine if the *previous* email in the chain was opened.
+        # If this is the 1st follow-up, the previous is the main email.
+        # If this is the 2nd or later follow-up, the previous is the most recently sent follow-up.
+        sent_fups = await db.follow_ups.find({
+            "tracked_email_id": f["tracked_email_id"],
+            "sent": True
+        }).sort("sent_at", -1).to_list(1)
+        
+        if sent_fups:
+            is_opened = sent_fups[0].get("open_count", 0) > 0
+        else:
+            is_opened = em.get("open_count", 0) > 0
+
         is_replied = em.get("replied", False)
         
         should_send = False
@@ -1424,6 +1520,7 @@ async def mark_sent(fid: str, user: dict = Depends(get_current_user)):
             {"id": fup["tracked_email_id"]},
             {"$inc": {"follow_up_count": 1}}
         )
+        await _schedule_next_stage_if_needed(fup["tracked_email_id"], user["user_id"])
     return {"ok": True}
 
 @api_router.post("/follow-ups/{fid}/mark-sent-ext")
@@ -1439,7 +1536,73 @@ async def mark_sent_ext(fid: str, user: dict = Depends(get_user_by_ext_key)):
             {"id": fup["tracked_email_id"]},
             {"$inc": {"follow_up_count": 1}}
         )
+        await _schedule_next_stage_if_needed(fup["tracked_email_id"], user["user_id"])
     return {"ok": True}
+
+async def _schedule_next_stage_if_needed(tid: str, user_id: str):
+    em = await db.tracked_emails.find_one({"id": tid, "user_id": user_id})
+    if not em or em.get("replied"):
+        return
+
+    # Count how many follow-ups have been sent
+    sent_count = await db.follow_ups.count_documents({"tracked_email_id": tid, "sent": True})
+    
+    # Are there any pending ones?
+    pending_count = await db.follow_ups.count_documents({"tracked_email_id": tid, "sent": False})
+    if pending_count > 0:
+        return
+
+    rules = await db.automation_rules.find({"user_id": user_id}).sort([("updated_at", -1), ("created_at", -1)]).to_list(1)
+    all_stages = rules[0].get("stages", []) if rules else []
+    
+    if not all_stages:
+        return
+    
+    # Dual-branch logic: choose relevant stages based on open status
+    is_opened = em.get("open_count", 0) > 0
+    if is_opened:
+        relevant_stages = [s for s in all_stages if s.get("trigger") in ["opened_no_reply", "no_reply"]]
+        default_cond = "if_opened_no_reply"
+    else:
+        relevant_stages = [s for s in all_stages if s.get("trigger") in ["no_open"]]
+        default_cond = "if_no_open"
+        
+    if sent_count < len(relevant_stages):
+        next_stage = relevant_stages[sent_count]
+        trigger = next_stage.get("trigger")
+        
+        if trigger == "no_open": cond = "if_no_open"
+        elif trigger == "opened_no_reply": cond = "if_opened_no_reply"
+        else: cond = default_cond
+        
+        now_dt = datetime.now(timezone.utc)
+        delay = next_stage.get("days", 1)
+        time_val = next_stage.get("time")
+        
+        # Calculate schedule relative to MAIN email sent time for consistency
+        sent_at_raw = em.get("sent_at")
+        sent_at = datetime.fromisoformat(sent_at_raw) if isinstance(sent_at_raw, str) else sent_at_raw
+        if sent_at and sent_at.tzinfo is None: sent_at = sent_at.replace(tzinfo=timezone.utc)
+        
+        hour = int(time_val.split(":")[0]) if time_val and ":" in time_val else sent_at.hour
+        new_sched = get_next_business_time(sent_at, delay, target_hour=hour)
+        
+        # If new_sched is in the past (because we are late), schedule for soon
+        if new_sched < now_dt:
+            new_sched = now_dt + timedelta(minutes=5)
+
+        await _create_fup(
+            tid, 
+            next_stage["message"], 
+            delay, 
+            "auto", 
+            cond, 
+            user_id, 
+            custom_scheduled_at=new_sched, 
+            time=time_val
+        )
+        logging.info(f"Scheduled next stage ({cond}, Day {delay}) for {tid}")
+
 
 @api_router.post("/emails/{tid}/sequence")
 async def start_sequence(tid: str, user: dict = Depends(get_current_user)):
@@ -1702,6 +1865,18 @@ async def automation_worker():
 
                     is_opened = em.get("open_count", 0) > 0
                     
+                    # For cascading sequences, check if the previous follow-up was opened
+                    if cond == "if_opened_no_reply":
+                        current_delay = f.get("days_delay", 999)
+                        previous_fups = await db.follow_ups.find({
+                            "tracked_email_id": em["id"],
+                            "sent": True,
+                            "days_delay": {"$lt": current_delay}
+                        }).sort("days_delay", -1).to_list(1)
+                        
+                        if previous_fups:
+                            is_opened = previous_fups[0].get("open_count", 0) > 0
+
                     should_send = False
                     if cond == "always": 
                         should_send = True
@@ -1709,7 +1884,7 @@ async def automation_worker():
                         should_send = not is_opened
                     elif cond == "if_not_replied" or cond == "if_no_reply": 
                         should_send = not is_replied
-                    elif cond == "if_opened_no_reply" or cond == "if_opened_no_reply":
+                    elif cond == "if_opened_no_reply":
                         should_send = is_opened and not is_replied
                     
                     if is_replied: should_send = False
@@ -1733,15 +1908,34 @@ async def automation_worker():
                         )
                         if success:
                             # 4. Mark as sent
+                            now_sent = datetime.now(timezone.utc).isoformat()
                             await db.follow_ups.update_one(
                                 {"id": f["id"]},
-                                {"$set": {"sent": True, "sent_at": datetime.now(timezone.utc).isoformat()}}
+                                {"$set": {"sent": True, "sent_at": now_sent, "status": "sent"}}
                             )
-                            await db.tracked_emails.update_one(
-                                {"id": em["id"]},
-                                {"$inc": {"follow_up_count": 1}}
-                            )
-                            logging.info(f"Auto follow-up sent to {f['recipient']} for {em['id']}")
+                            
+                            # Update tracked_emails with specific timestamps for FUP1, FUP2
+                            upd = {"$inc": {"follow_up_count": 1}, "$set": {"last_activity_at": now_sent}}
+                            if f.get("days_delay") == 1:
+                                upd["$set"]["followup1_sent_at"] = now_sent
+                            elif f.get("days_delay") == 3:
+                                upd["$set"]["followup2_sent_at"] = now_sent
+                            
+                            await db.tracked_emails.update_one({"id": em["id"]}, upd)
+                            
+                            logging.info(f"Auto follow-up sent to {f['recipient']} for {em['id']} (Status: Sent)")
+                            
+                            # Trigger UI refresh via SSE
+                            push_event(f["user_id"], {
+                                "type": "followup_sent",
+                                "tracked_id": em["id"],
+                                "recipient": em["recipient"]
+                            })
+                            
+                            # CASCADING: Schedule the next stage automatically
+                            await schedule_next_stage(em["id"], f["user_id"], f.get("days_delay"), f.get("trigger_condition"))
+                        else:
+                            logging.error(f"Failed to send auto follow-up {f['id']} for {em['id']}. Will retry.")
 
             except Exception as e:
                 logging.error(f"Automation worker error: {e}")

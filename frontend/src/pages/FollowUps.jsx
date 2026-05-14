@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { CheckCheck, Calendar, Trash2, ArrowRight } from "lucide-react";
-import { api } from "../lib/api";
+import { api, API } from "../lib/api";
 import { Button } from "../components/ui/button";
 import { toast } from "sonner";
 
@@ -41,7 +41,21 @@ export default function FollowUps() {
     }
   };
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { 
+    load(); 
+    // SSE listener for real-time updates
+    const url = `${API}/events/stream`;
+    const es = new EventSource(url, { withCredentials: true });
+    es.onmessage = (ev) => {
+      try {
+        const data = JSON.parse(ev.data);
+        if (data.type === "followup_sent" || data.type === "open" || data.type === "reply") {
+          load();
+        }
+      } catch {}
+    };
+    return () => es.close();
+  }, []);
 
   const markSent = async (fid) => {
     await api.post(`/follow-ups/${fid}/mark-sent`);
@@ -91,11 +105,21 @@ export default function FollowUps() {
                 rows.map((f) => (
                   <tr key={f.id} className="hover:bg-slate-50/50 transition-colors">
                     <td className="px-4 py-3">
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex items-center gap-2">
                         {f.sent ? (
-                          <CheckCheck className={`w-4 h-4 ${f.open_count > 0 ? "text-emerald-500" : "text-slate-200"}`} strokeWidth={2.5} />
+                          <div className="flex items-center gap-1.5 px-2 py-0.5 bg-emerald-50 text-emerald-600 rounded-full border border-emerald-100 shadow-sm">
+                            <CheckCheck className="w-3 h-3" strokeWidth={3} />
+                            <span className="text-[9px] font-black uppercase tracking-tight">Sent</span>
+                          </div>
+                        ) : f.status === 'stopped' ? (
+                          <div className="px-2 py-0.5 bg-slate-100 text-slate-400 rounded-full border border-slate-200">
+                             <span className="text-[9px] font-black uppercase tracking-tight">Stopped</span>
+                          </div>
                         ) : (
-                          <div className="w-4 h-4 rounded-full border-2 border-slate-200 border-t-blue-500 animate-spin" />
+                          <div className="flex items-center gap-2">
+                             <div className="w-4 h-4 rounded-full border-2 border-slate-100 border-t-blue-500 animate-spin" />
+                             <span className="text-[10px] font-bold text-blue-600 uppercase tracking-tighter">Counting Down</span>
+                          </div>
                         )}
                       </div>
                     </td>
@@ -107,11 +131,20 @@ export default function FollowUps() {
                     </td>
                     <td className="px-4 py-3">
                        <div className="text-sm text-slate-600 font-medium">{f.recipient}</div>
-                       <div className="text-[9px] font-black uppercase tracking-tight text-slate-400">{f.mode} · {f.trigger_condition.replace('_',' ')}</div>
+                       <div className="text-[9px] font-black uppercase tracking-tight text-slate-400">{f.mode} · {f.trigger_condition.replace('if_','').replace('_',' ')}</div>
                     </td>
                     <td className="px-4 py-3">
-                      <div className="text-sm font-bold text-slate-900">{f.sent ? formatRel(f.sent_at) : formatRel(f.scheduled_at)}</div>
-                      <div className="text-[10px] text-slate-400">{f.sent ? 'Sent' : 'Scheduled'} {fmt(f.sent ? f.sent_at : f.scheduled_at)}</div>
+                      <div className="text-sm font-bold text-slate-900">
+                        {f.sent ? formatRel(f.sent_at) : (
+                          <div className="flex items-center gap-1">
+                             <Calendar className="w-3 h-3 text-blue-500" />
+                             {formatRel(f.scheduled_at)}
+                          </div>
+                        )}
+                      </div>
+                      <div className="text-[10px] text-slate-400">
+                        {f.sent ? `Sent ${fmt(f.sent_at)}` : `Scheduled ${fmt(f.scheduled_at)}`}
+                      </div>
                     </td>
                     <td className="px-4 py-3 text-right">
                       <div className="flex items-center justify-end gap-2">
