@@ -15,8 +15,8 @@ def get_next_business_time(dt: datetime, days_offset: int, target_hour=None):
     if target.weekday() >= 5: # Sat or Sun
         days_to_monday = (7 - target.weekday()) % 7
         target = target + timedelta(days=days_to_monday)
-        target = target.replace(hour=10, minute=0, second=0, microsecond=0)
-    elif target_hour is not None:
+        
+    if target_hour is not None:
         target = target.replace(hour=target_hour)
     return target
 

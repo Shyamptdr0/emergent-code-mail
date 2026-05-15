@@ -2,39 +2,64 @@ import os
 from motor.motor_asyncio import AsyncIOMotorClient
 import asyncio
 from datetime import datetime, timedelta, timezone
+from dotenv import load_dotenv
+from pathlib import Path
 
-def get_next_business_time(dt, days_offset, target_hour=None):
-    target = dt + timedelta(days=days_offset)
-    if target.weekday() >= 5:
+# Load env from parent dir
+ROOT_DIR = Path(__file__).parent
+load_dotenv(ROOT_DIR / '.env')
+
+def get_next_business_time(dt, offset, unit="days", target_hour=None):
+    if unit == "hours":
+        target = dt + timedelta(hours=offset)
+    else:
+        target = dt + timedelta(days=offset)
+        
+    if target.weekday() >= 5: # Saturday or Sunday
         days_to_monday = (7 - target.weekday()) % 7
         target = target + timedelta(days=days_to_monday)
-        target = target.replace(hour=10, minute=0, second=0, microsecond=0)
-    elif target_hour is not None:
+        
+    if target_hour is not None and unit == "days":
         target = target.replace(hour=target_hour)
     return target
 
 async def fix_fups():
-    client = AsyncIOMotorClient("mongodb+srv://shyam8patidar_db_user:ZKhd4aH0sdwoukkb@cluster0.8flb9cw.mongodb.net/?appName=Cluster0")
-    db = client["test_database"]
+    mongo_url = os.environ.get("MONGO_URL")
+    db_name = os.environ.get("DB_NAME", "test_database")
+    client = AsyncIOMotorClient(mongo_url)
+    db = client[db_name]
     
-    fups = await db.follow_ups.find({"sent": False}).to_list(100)
+    print(f"Connected to {db_name}. Scanning for pending follow-ups...")
+    
+    # Find all follow-ups that are not sent and not completed
+    fups = await db.follow_ups.find({"sent": False, "completed": False}).to_list(500)
+    count = 0
+    
     for f in fups:
         em = await db.tracked_emails.find_one({"id": f["tracked_email_id"]})
         if not em: continue
         
-        sent_at = datetime.fromisoformat(em["sent_at"])
-        if sent_at.tzinfo is None: sent_at = sent_at.replace(tzinfo=timezone.utc)
+        # Use sent_at of the parent email as the base for the first follow-up
+        # Or use now() if it's a cascading one? 
+        # Actually, the logic in the server uses sent_at for upfront ones and now() for cascading ones.
+        # To be safe, we check if the current scheduled_at is on a weekend.
         
-        # If the follow-up 'time' is "09:00" or empty, we use the original time
-        time_val = f.get("time")
-        if time_val == "09:00": time_val = "" # Migration
+        curr_sched = datetime.fromisoformat(f["scheduled_at"])
+        if curr_sched.tzinfo is None: curr_sched = curr_sched.replace(tzinfo=timezone.utc)
         
-        hour = int(time_val.split(":")[0]) if time_val and ":" in time_val else None
-        new_sched = get_next_business_time(sent_at, f["days_delay"], target_hour=hour)
-        
-        if f["scheduled_at"] != new_sched.isoformat():
-            await db.follow_ups.update_one({"_id": f["_id"]}, {"$set": {"scheduled_at": new_sched.isoformat(), "time": time_val}})
-            print(f"Rescheduled FUP {f['id']} from {f['scheduled_at']} to {new_sched.isoformat()}")
+        if curr_sched.weekday() >= 5:
+            # It's on a weekend! Shift it to Monday.
+            days_to_monday = (7 - curr_sched.weekday()) % 7
+            new_sched = curr_sched + timedelta(days=days_to_monday)
+            
+            await db.follow_ups.update_one(
+                {"_id": f["_id"]}, 
+                {"$set": {"scheduled_at": new_sched.isoformat()}}
+            )
+            print(f"FIXED: FUP {f['id']} (Subject: {f.get('subject')}) shifted from {f['scheduled_at']} to {new_sched.isoformat()}")
+            count += 1
+            
+    print(f"Finished. Total follow-ups fixed: {count}")
 
 if __name__ == "__main__":
     asyncio.run(fix_fups())

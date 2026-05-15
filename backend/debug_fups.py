@@ -1,32 +1,23 @@
+import os
 import asyncio
 from motor.motor_asyncio import AsyncIOMotorClient
-import os
 from dotenv import load_dotenv
+from datetime import datetime
 
 load_dotenv()
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
 
-async def run():
-    # Find the most recent tracked email
-    em = await db.tracked_emails.find().sort("sent_at", -1).to_list(1)
-    if not em:
-        print("No emails found")
-        return
+async def check():
+    client = AsyncIOMotorClient(os.environ['MONGO_URL'])
+    db = client[os.environ['DB_NAME']]
     
-    tid = em[0]['id']
-    print(f"Tracking ID: {tid}")
-    print(f"Recipient: {em[0]['recipient']}")
-    print(f"Sent at: {em[0]['sent_at']}")
-    print(f"Open Count: {em[0]['open_count']}")
-    print(f"Replied: {em[0]['replied']}")
-    
-    # Find follow-ups for this email
-    fups = await db.follow_ups.find({"tracked_email_id": tid}).sort("scheduled_at", 1).to_list(100)
-    print(f"Follow-ups found: {len(fups)}")
-    for f in fups:
-        print(f"  ID: {f['id']}, Trigger: {f['trigger_condition']}, Days: {f['days_delay']}, Scheduled: {f['scheduled_at']}, Sent: {f['sent']}")
+    # Get recent emails
+    emails = await db.tracked_emails.find().sort("created_at", -1).to_list(10)
+    print(f"{'Email ID':<32} | {'Recipient':<20} | {'Open Count':<5} | {'FUPs'}")
+    print("-" * 80)
+    for e in emails:
+        fups = await db.follow_ups.find({"tracked_email_id": e["id"]}).to_list(20)
+        fup_info = ", ".join([f"{f.get('trigger_condition')}({f.get('sent')})" for f in fups])
+        print(f"{e['id']:<32} | {e['recipient']:<20} | {e.get('open_count', 0):<10} | {fup_info}")
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    asyncio.run(check())
